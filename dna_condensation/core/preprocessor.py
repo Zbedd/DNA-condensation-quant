@@ -10,6 +10,7 @@ def collapse_z_axis(nd2_image: Union[ND2Reader, np.ndarray],
                     verbose: bool = False) -> np.ndarray:
     """
     Collapse an ND2 hyperstack image along the z-axis to create a 2D projection.
+    This version properly preserves channel information.
     
     Args:
         nd2_image: ND2Reader object or numpy array with z-dimension
@@ -36,32 +37,12 @@ def collapse_z_axis(nd2_image: Union[ND2Reader, np.ndarray],
     if method not in projection_methods:
         raise ValueError(f"Unsupported method '{method}'. Choose from: {list(projection_methods.keys())}")
     
-    # Convert ND2Reader to numpy array if needed
+    # Convert ND2Reader to numpy array with channel preservation
     if isinstance(nd2_image, ND2Reader):
         if verbose:
-            print(f"Converting ND2 hyperstack to numpy array...")
-        try:
-            # Get raw array without automatic squeezing
-            image_data = np.array(nd2_image)
-            if verbose:
-                print(f"Initial converted shape: {image_data.shape}")
-                print(f"Number of dimensions: {image_data.ndim}")
-                print(f"Array dtype: {image_data.dtype}")
-            
-            # Check ND2 metadata to understand original structure
-            if hasattr(nd2_image, 'sizes') and verbose:
-                print(f"Original ND2 sizes: {nd2_image.sizes}")
-                
-            # If we have singleton dimensions that were squeezed, we might need to handle them
-            expected_dims = len(getattr(nd2_image, 'sizes', {}))
-            actual_dims = image_data.ndim
-            if expected_dims != actual_dims and verbose:
-                print(f"WARNING: Expected {expected_dims} dimensions but got {actual_dims}")
-                print("This might indicate singleton dimensions were automatically squeezed")
-                
-        except Exception as e:
-            print(f"Error converting ND2 to array: {e}")
-            raise
+            print(f"Converting ND2 hyperstack to numpy array with channel preservation...")
+        
+        image_data = _nd2_to_array_preserve_channels(nd2_image, verbose=verbose)
     else:
         image_data = nd2_image
     
@@ -69,35 +50,104 @@ def collapse_z_axis(nd2_image: Union[ND2Reader, np.ndarray],
     if not isinstance(image_data, np.ndarray):
         raise ValueError("Input must be ND2Reader object or numpy array")
     
-    # Find z-axis dimension
-    z_axis = _find_z_axis(image_data, nd2_image if isinstance(nd2_image, ND2Reader) else None, verbose=verbose)
-    
-    if z_axis is None:
-        raise ValueError("No z-dimension found in image data")
-    
-    # Additional validation before applying projection
     if verbose:
-        print(f"About to collapse axis {z_axis} from shape {image_data.shape}")
-    if z_axis >= image_data.ndim:
-        raise ValueError(f"Z-axis index {z_axis} is out of bounds for array with {image_data.ndim} dimensions")
-    
-    # Apply projection method along z-axis
-    projection_func = projection_methods[method]
-    try:
-        collapsed_image = projection_func(image_data, axis=z_axis)
-        if verbose:
-            print(f"Collapsed to shape: {collapsed_image.shape}")
-    except Exception as e:
-        print(f"Error during {method} projection along axis {z_axis}: {e}")
-        print(f"Array shape: {image_data.shape}")
+        print(f"Processing array shape: {image_data.shape}")
         print(f"Array dtype: {image_data.dtype}")
-        raise
+    
+    # Apply z-axis collapse with channel preservation
+    collapsed_image = _collapse_z_preserve_channels(image_data, method, verbose=verbose)
     
     # Convert to uint8 if necessary
     if collapsed_image.dtype != np.uint8:
         collapsed_image = _normalize_to_uint8(collapsed_image)
     
     return collapsed_image
+
+
+def _nd2_to_array_preserve_channels(nd2_reader: ND2Reader, verbose: bool = False) -> np.ndarray:
+    """
+    Convert ND2Reader to numpy array while preserving channel information.
+    """
+    if verbose:
+        print(f"ND2 dimensions: {nd2_reader.sizes}")
+        print(f"ND2 axes: {nd2_reader.axes}")
+    
+    # Get the dimensions
+    sizes = nd2_reader.sizes
+    x_size = sizes.get('x', 1)
+    y_size = sizes.get('y', 1) 
+    c_size = sizes.get('c', 1)
+    t_size = sizes.get('t', 1)
+    z_size = sizes.get('z', 1)
+    
+    if verbose:
+        print(f"Expected final shape: ({y_size}, {x_size}, {c_size}) after z-collapse")
+    
+    # Initialize array with proper dimensions
+    if c_size > 1:
+        # Multi-channel: (y, x, c, z) for easier processing
+        full_array = np.zeros((y_size, x_size, c_size, z_size), dtype=np.uint16)
+        
+        # Load all data
+        for z in range(z_size):
+            for c in range(c_size):
+                # Set the frame - ND2Reader uses dict-style indexing
+                nd2_reader.default_coords['z'] = z
+                nd2_reader.default_coords['c'] = c
+                nd2_reader.default_coords['t'] = 0  # Usually t=0
+                
+                frame = np.array(nd2_reader[0])  # Get the frame
+                full_array[:, :, c, z] = frame
+                
+        if verbose:
+            print(f"Loaded multi-channel array shape: {full_array.shape}")
+        return full_array
+        
+    else:
+        # Single channel: just (y, x, z)
+        full_array = np.zeros((y_size, x_size, z_size), dtype=np.uint16)
+        
+        for z in range(z_size):
+            nd2_reader.default_coords['z'] = z
+            nd2_reader.default_coords['t'] = 0
+            frame = np.array(nd2_reader[0])
+            full_array[:, :, z] = frame
+            
+        if verbose:
+            print(f"Loaded single-channel array shape: {full_array.shape}")
+        return full_array
+
+
+def _collapse_z_preserve_channels(image_array: np.ndarray, method: str = 'mean', verbose: bool = False) -> np.ndarray:
+    """
+    Collapse z-axis while preserving channels.
+    """
+    if verbose:
+        print(f"Input array shape: {image_array.shape}")
+    
+    projection_func = {
+        'max': np.max,
+        'mean': np.mean,
+        'sum': np.sum,
+        'median': np.median
+    }[method]
+    
+    if image_array.ndim == 4:  # (y, x, c, z)
+        # Multi-channel: collapse last axis (z)
+        collapsed = projection_func(image_array, axis=3)
+        if verbose:
+            print(f"Collapsed multi-channel shape: {collapsed.shape} (should be y, x, c)")
+            
+    elif image_array.ndim == 3:  # (y, x, z) 
+        # Single channel: collapse last axis (z)
+        collapsed = projection_func(image_array, axis=2)
+        if verbose:
+            print(f"Collapsed single-channel shape: {collapsed.shape} (should be y, x)")
+            
+    else:
+        raise ValueError(f"Unexpected array dimensions: {image_array.ndim}")
+    
+    return collapsed
 
 
 def _find_z_axis(image_data: np.ndarray, nd2_reader: Optional[ND2Reader] = None, verbose: bool = False) -> Optional[int]:

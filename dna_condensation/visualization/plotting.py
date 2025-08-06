@@ -3,7 +3,7 @@ import numpy as np
 from typing import Optional, Tuple, Union
 
 
-def plot(image: np.ndarray, 
+def plot_image(image: np.ndarray, 
          title: Optional[str] = None,
          figsize: Tuple[int, int] = (10, 8),
          cmap: str = 'gray',
@@ -150,3 +150,106 @@ def plot_multiple(images: list,
     
     plt.tight_layout()
     plt.show()
+
+
+def plot_image_mask(image: np.ndarray, 
+                   mask: np.ndarray,
+                   title: Optional[str] = None,
+                   figsize: Tuple[int, int] = (15, 6),
+                   alpha: float = 0.5) -> None:
+    """
+    Plot an image alongside its segmentation mask for visualization.
+    
+    Args:
+        image: Original image as numpy array (uint8 format expected)
+        mask: Segmentation mask as numpy array (binary or labeled)
+        title: Optional main title for the figure
+        figsize: Figure size as (width, height) tuple
+        alpha: Transparency for overlay (0.0 = transparent, 1.0 = opaque)
+    
+    Raises:
+        ValueError: If image and mask shapes don't match
+        TypeError: If image dtype is not uint8
+    """
+    # Validate inputs
+    if not isinstance(image, np.ndarray):
+        raise ValueError("Image must be a numpy array")
+    
+    if not isinstance(mask, np.ndarray):
+        raise ValueError("Mask must be a numpy array")
+    
+    if image.dtype != np.uint8:
+        raise TypeError(f"Expected uint8 image, got {image.dtype}")
+    
+    # Handle different image dimensions for comparison
+    img_shape = image.shape[:2]  # Get height, width only
+    mask_shape = mask.shape[:2] if mask.ndim >= 2 else mask.shape
+    
+    if img_shape != mask_shape:
+        raise ValueError(f"Image shape {img_shape} doesn't match mask shape {mask_shape}")
+    
+    # Prepare image for display
+    if image.ndim == 3 and image.shape[2] == 1:
+        display_image = image.squeeze()
+    else:
+        display_image = image
+    
+    # Prepare mask for display
+    display_mask = mask.squeeze() if mask.ndim > 2 else mask
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    
+    # Plot 1: Original image
+    if display_image.ndim == 3 and display_image.shape[2] in [3, 4]:
+        # RGB/RGBA image
+        axes[0].imshow(display_image)
+    else:
+        # Grayscale image
+        axes[0].imshow(display_image, cmap='gray')
+    
+    axes[0].set_title('Original Image', fontsize=12, fontweight='bold')
+    axes[0].axis('off')
+    
+    # Plot 2: Segmentation mask
+    # Use different colors for different labels if it's a labeled mask
+    if display_mask.max() > 1:
+        # Multi-label mask
+        im_mask = axes[1].imshow(display_mask, cmap='tab10')
+        plt.colorbar(im_mask, ax=axes[1], label='Object ID')
+    else:
+        # Binary mask
+        axes[1].imshow(display_mask, cmap='Reds', alpha=0.8)
+    
+    axes[1].set_title('Segmentation Mask', fontsize=12, fontweight='bold')
+    axes[1].axis('off')
+    
+    # Plot 3: Overlay
+    if display_image.ndim == 3 and display_image.shape[2] in [3, 4]:
+        # RGB/RGBA image
+        axes[2].imshow(display_image)
+    else:
+        # Grayscale image
+        axes[2].imshow(display_image, cmap='gray')
+    
+    # Overlay mask with transparency
+    if display_mask.max() > 1:
+        # Multi-label mask - use different colors
+        axes[2].imshow(display_mask, cmap='tab10', alpha=alpha)
+    else:
+        # Binary mask - use red overlay
+        axes[2].imshow(display_mask, cmap='Reds', alpha=alpha)
+    
+    axes[2].set_title('Overlay', fontsize=12, fontweight='bold')
+    axes[2].axis('off')
+    
+    # Add main title if provided
+    if title:
+        fig.suptitle(title, fontsize=16, fontweight='bold')
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Display the plot
+    plt.show()
+    

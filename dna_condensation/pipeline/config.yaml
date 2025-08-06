@@ -11,4 +11,8 @@ temp_path: "./temp"          # Temporary processing files
 # Adjust these based on your microscope configuration
 image_channels:
   - "Channel_0"    # DNA staining channel
-  - "Channel_1"     # Add other channels as needed
+  - "Channel_1"     # LSD1 GFP Channel
+
+# ==== SEGMENTATION SETTINGS ====
+# Channel selection for nucleus segmentation
+segmentation_channel_index: 0  # index to use for quantification 

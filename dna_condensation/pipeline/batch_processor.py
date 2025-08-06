@@ -7,12 +7,14 @@ sys.path.insert(0, str(project_root))
 
 # Imports
 import os
-from imageProcessingUtils.yolo.segmentation import get_yolo_segmentation
-from imageProcessingUtils.file_io.nd2_reader import characterize_nd2
-from dna_condensation.pipeline.config import config
+from dna_condensation.pipeline.config import Config
 from dna_condensation.core.image_loader import get_nd2_objects
 from dna_condensation.core.preprocessor import batch_collapse_z_axis
 from dna_condensation.core.segmentation import bulk_segment_images
+from dna_condensation.visualization.plotting import plot_image, plot_multiple, plot_image_mask
+
+# Initialize config
+config = Config()
 
 '''
 Sample ND2 File Analysis: 48hr_dk16_wtLSD1_well1_20x001.nd2
@@ -67,10 +69,25 @@ def main():
   print(f"Collapsing z-axis for {len(nd2_objects)} ND2 files")
   collapsed_images = batch_collapse_z_axis(nd2_objects, method='mean')
   
-  print('Segmenting collapsed images with YOLO model')
-  masks = bulk_segment_images(collapsed_images)
+  # Get segmentation channel index from config
+  channel_index = config.get("segmentation_channel_index", 0)
+  print(f'Segmenting collapsed images with YOLO model (using channel {channel_index})')
+  masks = bulk_segment_images(collapsed_images, channel_index=channel_index)
 
+  # Prepare image for visualization - extract the same channel used for segmentation
+  first_image = collapsed_images[0]
+  if first_image.ndim == 3:
+    # Multi-channel image - extract the channel used for segmentation
+    display_image = first_image[:, :, channel_index]
+    print(f"Extracted channel {channel_index} for visualization: {display_image.shape}")
+  else:
+    # Single-channel image
+    display_image = first_image
+    print(f"Using single-channel image for visualization: {display_image.shape}")
   
+  plot_image_mask(display_image, masks[0])
+
+  '''CHECK THE FORMAT OF MASKS'''
 
 if __name__ == "__main__":
   main()

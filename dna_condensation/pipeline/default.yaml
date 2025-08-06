@@ -1,0 +1,28 @@
+# Default Configuration for DNA Condensation Quantification
+# This file contains default values - copy to config.yaml and modify as needed
+
+# ==== FILE PATHS ====
+# REQUIRED: Set the path to your ND2 files
+raw_nd2_path: null              # Path to folder containing ND2 files
+output_path: "./output"         # Where to save results
+temp_path: "./temp"             # Temporary processing files
+
+# ==== MICROSCOPE SETTINGS ====
+# Adjust these based on your microscope configuration
+image_channels:
+  - "Channel_0"    # DNA staining channel
+  - "Channel_1"    # LSD1 GFP channel
+
+# ==== SEGMENTATION SETTINGS ====
+# Channel selection for nucleus segmentation
+segmentation_channel_index: 0   # index to use for quantification 
+
+# ==== PROCESSING SETTINGS ====
+# Z-axis collapse method
+z_collapse_method: "mean"       # Options: "max", "mean", "sum", "median"
+
+# GPU acceleration
+use_gpu: true                   # Enable GPU acceleration if available
+
+# Verbose output
+verbose: true                   # Print detailed progress information
