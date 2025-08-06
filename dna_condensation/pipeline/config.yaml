@@ -1,0 +1,14 @@
+# DNA Condensation Quantification Configuration
+# Edit the values below for your specific analysis
+
+# ==== FILE PATHS ====
+# REQUIRED: Set the path to your ND2 files
+raw_nd2_path: "G:/My Drive/KatzLab/DNA-condensation-quantification/raw_nd2"  # Example: "C:/Users/YourName/Data/nd2_files"
+output_path: "./output"      # Where to save results
+temp_path: "./temp"          # Temporary processing files
+
+# ==== MICROSCOPE SETTINGS ====
+# Adjust these based on your microscope configuration
+image_channels:
+  - "Channel_0"    # DNA staining channel
+  - "Channel_1"     # Add other channels as needed
