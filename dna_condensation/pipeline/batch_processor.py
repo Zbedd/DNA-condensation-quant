@@ -9,9 +9,10 @@ sys.path.insert(0, str(project_root))
 import os
 from dna_condensation.pipeline.config import Config
 from dna_condensation.core.image_loader import get_nd2_objects
-from dna_condensation.core.preprocessor import batch_collapse_z_axis
+from dna_condensation.core.z_stack_handling import batch_collapse_z_axis
+from dna_condensation.core.preprocessor import bulk_preprocess_images, per_nucleus_intensity_normalization
 from dna_condensation.core.segmentation import bulk_segment_images
-from dna_condensation.visualization.plotting import plot_image, plot_multiple, plot_image_mask
+from dna_condensation.visualization.plotting import plot_image, plot_multiple, plot_image_mask, plot_preprocessing_comparison
 
 # Initialize config
 config = Config()
@@ -73,27 +74,105 @@ def main():
   channel_index = config.get("segmentation_channel_index")
   segmentation_method = config.get("segmentation_method")
   
+  # Get preprocessing configuration
+  preprocessing_config = config.get("preprocessing")
+  
+  # Apply global preprocessing if enabled
+  global_preprocessed = None
+  if any([preprocessing_config.get("background_correction"), 
+          preprocessing_config.get("deconvolution"), 
+          preprocessing_config.get("intensity_normalization")]):
+    
+    # Build preprocessing methods list based on config
+    methods = []
+    if preprocessing_config.get("deconvolution"):
+      methods.append("deconvolution")
+    if preprocessing_config.get("background_correction"):
+      methods.append("background_correction")
+    if preprocessing_config.get("intensity_normalization"):
+      methods.append("intensity_normalization")
+    
+    print(f"Applying global preprocessing: {' → '.join(methods)}")
+    global_preprocessed = bulk_preprocess_images(
+      collapsed_images,
+      channel_index=channel_index,
+      methods=methods,
+      bg_ball_radius=preprocessing_config.get("bg_ball_radius", 50),
+      deconv_iterations=preprocessing_config.get("deconv_iterations", 10),
+      norm_method=preprocessing_config.get("norm_method", "percentile")
+    )
+  else:
+    global_preprocessed = collapsed_images
+    print("No global preprocessing applied")
+  
   # Get size filtering configuration
   size_filter_config = config.get("size_filtering")
   
-  filter_status = f"with {size_filter_config.get('min_size_percentage')}% size filter" if size_filter_config.get('enabled') else "no size filtering"
-  print(f'Segmenting collapsed images with {segmentation_method.upper()} model (using channel {channel_index}, {filter_status})')
+  # Get plotting configuration
+  plot_config = config.get("plot")
+  plot_segmentation = plot_config.get("plot_segmentation") 
   
-  masks = bulk_segment_images(collapsed_images, channel_index=channel_index, method=segmentation_method, 
+  filter_status = f"with {size_filter_config.get('min_size_percentage')}% size filter" if size_filter_config.get('enabled') else "no size filtering"
+  print(f'Segmenting processed images with {segmentation_method.upper()} model (using channel {channel_index}, {filter_status})')
+  
+  # Use globally preprocessed images for segmentation
+  masks = bulk_segment_images(global_preprocessed, channel_index=channel_index, method=segmentation_method, 
                              size_filter_config=size_filter_config)
 
-  # Prepare image for visualization - extract the same channel used for segmentation
-  first_image = collapsed_images[0]
-  if first_image.ndim == 3:
-    # Multi-channel image - extract the channel used for segmentation
-    display_image = first_image[:, :, channel_index]
-    print(f"Extracted channel {channel_index} for visualization: {display_image.shape}")
-  else:
-    # Single-channel image
-    display_image = first_image
-    print(f"Using single-channel image for visualization: {display_image.shape}")
+  # Apply per-nucleus normalization if enabled
+  per_nucleus_preprocessed = None
+  per_nucleus_stats = None
+  if preprocessing_config.get("per_nucleus_normalization") and masks[0] is not None:
+    print("Applying per-nucleus intensity normalization...")
+    per_nucleus_preprocessed = []
+    per_nucleus_stats = []
+    
+    for i, (image, labels) in enumerate(zip(global_preprocessed, masks)):
+      if image is not None and labels is not None:
+        # Extract channel for per-nucleus processing
+        if image.ndim == 3:
+          channel_image = image[:, :, channel_index]
+        else:
+          channel_image = image
+          
+        norm_image, stats = per_nucleus_intensity_normalization(
+          channel_image, labels, target_mean=1.0, verbose=(i == 0)
+        )
+        per_nucleus_preprocessed.append(norm_image)
+        per_nucleus_stats.append(stats)
+      else:
+        per_nucleus_preprocessed.append(None)
+        per_nucleus_stats.append({})
   
-  plot_image_mask(display_image, masks[0])
+  # Visualization if enabled
+  if plot_segmentation and masks[0] is not None:
+    # Prepare image for visualization - extract the same channel used for segmentation
+    first_image = collapsed_images[0]
+    if first_image.ndim == 3:
+      # Multi-channel image - extract the channel used for segmentation
+      display_image = first_image[:, :, channel_index]
+      print(f"Extracted channel {channel_index} for visualization: {display_image.shape}")
+    else:
+      # Single-channel image
+      display_image = first_image
+      print(f"Using single-channel image for visualization: {display_image.shape}")
+    
+    # Show comprehensive preprocessing comparison if per-nucleus normalization was applied
+    if per_nucleus_preprocessed and per_nucleus_preprocessed[0] is not None:
+      global_display = global_preprocessed[0]
+      if global_display.ndim == 3:
+        global_display = global_display[:, :, channel_index]
+      
+      plot_preprocessing_comparison(
+        original_image=display_image,
+        global_preprocessed=global_display,
+        per_nucleus_preprocessed=per_nucleus_preprocessed[0],
+        labels=masks[0],
+        title="DNA Condensation Preprocessing Pipeline"
+      )
+    else:
+      # Fallback to standard visualization
+      plot_image_mask(display_image, masks[0])
 
   '''CHECK THE FORMAT OF MASKS'''
 

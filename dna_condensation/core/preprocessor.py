@@ -1,320 +1,551 @@
 import numpy as np
-from typing import Union, Optional
-from nd2reader import ND2Reader
+from scipy import ndimage
+from skimage.restoration import rolling_ball
+from skimage.morphology import disk
+import cv2
+from typing import List, Tuple, Optional, Union, Dict
+import os
 
+# ==== PREPROCESSING FUNCTIONS FOR HOMOGENEITY ANALYSIS ====
 
-def collapse_z_axis(nd2_image: Union[ND2Reader, np.ndarray], 
-                    method: str = 'mean',
-                    channel: Optional[int] = None,
-                    timepoint: Optional[int] = None,
-                    verbose: bool = False) -> np.ndarray:
+"""
+RECOMMENDED PREPROCESSING ORDER FOR HOMOGENEITY ANALYSIS
+
+The order of preprocessing steps significantly affects the quality of homogeneity measurements.
+Follow this recommended sequence for optimal results:
+
+STANDARD WORKFLOW (for comparing images across experiments):
+1. deconvolution() [OPTIONAL] - Apply first to sharpen features before other corrections
+2. background_correction() [REQUIRED] - Remove spatial illumination artifacts 
+3. intensity_normalization() [RECOMMENDED] - Standardize intensity ranges across images
+
+PER-NUCLEUS WORKFLOW (for within-nucleus homogeneity analysis):
+1. deconvolution() [OPTIONAL] - Apply first if needed
+2. background_correction() [REQUIRED] - Critical for accurate within-nucleus measurements
+3. segmentation() [REQUIRED] - Generate nucleus labels (not in this module)
+4. per_nucleus_intensity_normalization() [RECOMMENDED] - Use INSTEAD of global intensity_normalization
+
+WHY THIS ORDER MATTERS:
+
+→ Deconvolution first: Works best on raw data before other intensity modifications
+→ Background correction second: Removes spatial artifacts that would bias all downstream analysis
+→ Intensity normalization last: Standardizes already-corrected images for comparison
+
+AVOID THESE COMMON MISTAKES:
+✗ Background correction after intensity normalization (loses spatial context)
+✗ Deconvolution after background correction (operates on modified intensities)
+✗ Using both global intensity_normalization AND per_nucleus_normalization (redundant)
+
+EXAMPLE USAGE:
+
+# Standard workflow for multi-image comparison:
+preprocessed = bulk_preprocess_images(
+    images, channel_index=0,
+    methods=['background_correction', 'intensity_normalization'],
+    bg_ball_radius=50, norm_method='percentile'
+)
+
+# Per-nucleus workflow for homogeneity analysis:
+bg_corrected = bulk_preprocess_images(
+    images, channel_index=0, 
+    methods=['background_correction'],  # Skip global normalization!
+    bg_ball_radius=50
+)
+# ... perform segmentation to get labels ...
+normalized_image, stats = per_nucleus_intensity_normalization(
+    bg_corrected[0], labels, target_mean=1.0
+)
+
+PARAMETER RECOMMENDATIONS:
+- bg_ball_radius: Set to ~1.5x average nucleus diameter (typically 30-100 pixels)
+- norm_method: Use 'percentile' (robust) or 'target_mean' (preserves relative intensities)
+- deconv_iterations: Start with 5-10 iterations, increase if needed
+- target_mean: Use 1.0 for per-nucleus normalization (makes CV calculations intuitive)
+
+"""
+
+def deconvolution(image: np.ndarray, channel_index: int, sigma: float = 1.0, iterations: int = 10) -> np.ndarray:
     """
-    Collapse an ND2 hyperstack image along the z-axis to create a 2D projection.
-    This version properly preserves channel information.
+    Apply Richardson-Lucy deconvolution to sharpen features and reduce out-of-focus haze.
+    This is a simplified deconvolution using scipy - for better results consider using
+    specialized tools like Huygens or DeconvLab2.
+    
+    PROCESSING ORDER: Apply FIRST in preprocessing pipeline (before background correction)
     
     Args:
-        nd2_image: ND2Reader object or numpy array with z-dimension
-        method: Projection method ('max', 'mean', 'sum', 'median')
-        channel: Specific channel to process (None = all channels)
-        timepoint: Specific timepoint to process (None = first timepoint)
-        verbose: Whether to print detailed debug information
+        image: Input image as numpy array (uint8 format expected)
+        channel_index: Index of the channel to process (0-based)
+        sigma: Standard deviation for the PSF Gaussian kernel
+        iterations: Number of Richardson-Lucy iterations
     
     Returns:
-        numpy.ndarray: 2D or 3D array (depending on channels) with z-axis collapsed
+        numpy.ndarray: Deconvolved image in uint8 format
         
-    Raises:
-        ValueError: If method is not supported or no z-dimension found
-        IndexError: If specified channel/timepoint doesn't exist
+    Recommended Usage:
+        Apply first to raw images before other preprocessing steps.
+        Deconvolution works best on unmodified intensity data.
     """
-    # Supported projection methods
-    projection_methods = {
-        'max': np.max,
-        'mean': np.mean,
-        'sum': np.sum,
-        'median': np.median
-    }
+    if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
+        raise ValueError("Input image must be a numpy array of dtype uint8")
     
-    if method not in projection_methods:
-        raise ValueError(f"Unsupported method '{method}'. Choose from: {list(projection_methods.keys())}")
-    
-    # Convert ND2Reader to numpy array with channel preservation
-    if isinstance(nd2_image, ND2Reader):
-        if verbose:
-            print(f"Converting ND2 hyperstack to numpy array with channel preservation...")
-        
-        image_data = _nd2_to_array_preserve_channels(nd2_image, verbose=verbose)
+    # Extract specific channel for processing
+    if image.ndim == 3:
+        if channel_index < 0 or channel_index >= image.shape[2]:
+            raise ValueError(f"Channel index {channel_index} is out of range for image with {image.shape[2]} channels")
+        processed_image = image[:, :, channel_index].astype(np.float64)
+    elif image.ndim == 2:
+        processed_image = image.astype(np.float64)
+        if channel_index != 0:
+            print(f"Warning: channel_index={channel_index} specified for 2D image, using single channel")
     else:
-        image_data = nd2_image
+        raise ValueError(f"Unsupported image dimensions: {image.ndim}")
     
-    # Validate input array
-    if not isinstance(image_data, np.ndarray):
-        raise ValueError("Input must be ND2Reader object or numpy array")
-    
-    if verbose:
-        print(f"Processing array shape: {image_data.shape}")
-        print(f"Array dtype: {image_data.dtype}")
-    
-    # Apply z-axis collapse with channel preservation
-    collapsed_image = _collapse_z_preserve_channels(image_data, method, verbose=verbose)
-    
-    # Convert to uint8 if necessary
-    if collapsed_image.dtype != np.uint8:
-        collapsed_image = _normalize_to_uint8(collapsed_image)
-    
-    return collapsed_image
-
-
-def _nd2_to_array_preserve_channels(nd2_reader: ND2Reader, verbose: bool = False) -> np.ndarray:
-    """
-    Convert ND2Reader to numpy array while preserving channel information.
-    """
-    if verbose:
-        print(f"ND2 dimensions: {nd2_reader.sizes}")
-        print(f"ND2 axes: {nd2_reader.axes}")
-    
-    # Get the dimensions
-    sizes = nd2_reader.sizes
-    x_size = sizes.get('x', 1)
-    y_size = sizes.get('y', 1) 
-    c_size = sizes.get('c', 1)
-    t_size = sizes.get('t', 1)
-    z_size = sizes.get('z', 1)
-    
-    if verbose:
-        print(f"Expected final shape: ({y_size}, {x_size}, {c_size}) after z-collapse")
-    
-    # Initialize array with proper dimensions
-    if c_size > 1:
-        # Multi-channel: (y, x, c, z) for easier processing
-        full_array = np.zeros((y_size, x_size, c_size, z_size), dtype=np.uint16)
+    try:
+        # Normalize to 0-1 range
+        processed_image = processed_image / 255.0
         
-        # Load all data
-        for z in range(z_size):
-            for c in range(c_size):
-                # Set the frame - ND2Reader uses dict-style indexing
-                nd2_reader.default_coords['z'] = z
-                nd2_reader.default_coords['c'] = c
-                nd2_reader.default_coords['t'] = 0  # Usually t=0
-                
-                frame = np.array(nd2_reader[0])  # Get the frame
-                full_array[:, :, c, z] = frame
-                
-        if verbose:
-            print(f"Loaded multi-channel array shape: {full_array.shape}")
-        return full_array
+        # Create a simple Gaussian PSF (Point Spread Function)
+        psf_size = int(6 * sigma + 1)
+        if psf_size % 2 == 0:
+            psf_size += 1
         
-    else:
-        # Single channel: just (y, x, z)
-        full_array = np.zeros((y_size, x_size, z_size), dtype=np.uint16)
+        y, x = np.ogrid[-psf_size//2:psf_size//2+1, -psf_size//2:psf_size//2+1]
+        psf = np.exp(-(x*x + y*y) / (2.0 * sigma**2))
+        psf = psf / psf.sum()
         
-        for z in range(z_size):
-            nd2_reader.default_coords['z'] = z
-            nd2_reader.default_coords['t'] = 0
-            frame = np.array(nd2_reader[0])
-            full_array[:, :, z] = frame
+        # Richardson-Lucy deconvolution
+        from scipy.signal import convolve2d
+        
+        # Initialize estimate
+        estimate = processed_image.copy()
+        
+        for i in range(iterations):
+            # Forward convolution
+            convolved = convolve2d(estimate, psf, mode='same', boundary='symm')
             
-        if verbose:
-            print(f"Loaded single-channel array shape: {full_array.shape}")
-        return full_array
-
-
-def _collapse_z_preserve_channels(image_array: np.ndarray, method: str = 'mean', verbose: bool = False) -> np.ndarray:
-    """
-    Collapse z-axis while preserving channels.
-    """
-    if verbose:
-        print(f"Input array shape: {image_array.shape}")
-    
-    projection_func = {
-        'max': np.max,
-        'mean': np.mean,
-        'sum': np.sum,
-        'median': np.median
-    }[method]
-    
-    if image_array.ndim == 4:  # (y, x, c, z)
-        # Multi-channel: collapse last axis (z)
-        collapsed = projection_func(image_array, axis=3)
-        if verbose:
-            print(f"Collapsed multi-channel shape: {collapsed.shape} (should be y, x, c)")
+            # Avoid division by zero
+            convolved = np.maximum(convolved, 1e-10)
             
-    elif image_array.ndim == 3:  # (y, x, z) 
-        # Single channel: collapse last axis (z)
-        collapsed = projection_func(image_array, axis=2)
-        if verbose:
-            print(f"Collapsed single-channel shape: {collapsed.shape} (should be y, x)")
+            # Calculate ratio
+            ratio = processed_image / convolved
             
-    else:
-        raise ValueError(f"Unexpected array dimensions: {image_array.ndim}")
-    
-    return collapsed
-
-
-def _find_z_axis(image_data: np.ndarray, nd2_reader: Optional[ND2Reader] = None, verbose: bool = False) -> Optional[int]:
-    """
-    Find which axis corresponds to the z-dimension by inspecting ND2 metadata.
-    Handles dimensions of size 1 that might be squeezed out.
-    
-    Args:
-        image_data: Image array
-        nd2_reader: Optional ND2Reader for metadata
-        verbose: Whether to print detailed debug information
-    
-    Returns:
-        int: Axis index for z-dimension, or None if not found
-    """
-    if verbose:
-        print(f"=== Z-AXIS DETECTION DEBUG ===")
-        print(f"Image data shape: {image_data.shape}")
-        print(f"Image data ndim: {image_data.ndim}")
-    
-    if nd2_reader:
-        # Check for axes attribute
-        if hasattr(nd2_reader, 'axes'):
-            axes = nd2_reader.axes
-            if verbose:
-                print(f"ND2 axes order: {axes}")
+            # Backward convolution with flipped PSF
+            psf_flipped = np.flip(psf)
+            correction = convolve2d(ratio, psf_flipped, mode='same', boundary='symm')
             
-            # Check for sizes to understand dimension mapping
-            if hasattr(nd2_reader, 'sizes'):
-                sizes = nd2_reader.sizes
-                if verbose:
-                    print(f"ND2 sizes: {sizes}")
-                
-                # Filter out dimensions of size 1 (they might be squeezed)
-                non_singleton_dims = [(dim, size) for dim, size in sizes.items() if size > 1]
-                if verbose:
-                    print(f"Non-singleton dimensions: {non_singleton_dims}")
-                
-                # Find z in non-singleton dimensions
-                if 'z' in [dim for dim, size in non_singleton_dims] and 'z' in sizes and sizes['z'] > 1:
-                    # Map z position considering only non-singleton dimensions
-                    z_size = sizes['z']
-                    if verbose:
-                        print(f"Looking for z-dimension with size {z_size}")
-                    
-                    # Find which axis in the current array has the z-size
-                    for i, dim_size in enumerate(image_data.shape):
-                        if dim_size == z_size:
-                            if verbose:
-                                print(f"Found z-dimension at axis {i} with size {dim_size}")
-                            return i
-                    
-                    if verbose:
-                        print(f"Could not find axis with z-size {z_size} in shape {image_data.shape}")
+            # Update estimate
+            estimate = estimate * correction
             
-            # Fallback: try original axes approach but with validation
-            if 'z' in axes:
-                z_position = axes.index('z')
-                if verbose:
-                    print(f"Z-axis found at metadata position: {z_position}")
-                
-                # But adjust for potentially squeezed dimensions
-                if z_position < image_data.ndim:
-                    if verbose:
-                        print(f"Z-axis position {z_position} is within array bounds")
-                    return z_position
-                else:
-                    if verbose:
-                        print(f"WARNING: Z-axis metadata position {z_position} exceeds array dimensions ({image_data.ndim})")
-                        print("Attempting to find z-axis by size matching...")
+            # Ensure positivity
+            estimate = np.maximum(estimate, 0)
+        
+        # Convert back to uint8
+        result = np.clip(estimate * 255, 0, 255).astype(np.uint8)
+        
+        # Restore original shape if multi-channel
+        if image.ndim == 3:
+            output = image.copy()
+            output[:, :, channel_index] = result
+            return output
         else:
-            if verbose:
-                print("ND2 object lacks 'axes' attribute")
+            return result
             
-        # Size-based detection as backup
-        if hasattr(nd2_reader, 'sizes'):
-            sizes = nd2_reader.sizes
-            if verbose:
-                print(f"ND2 sizes: {sizes}")
-            
-            if 'z' in sizes and sizes['z'] > 1:
-                z_size = sizes['z']
-                if verbose:
-                    print(f"Looking for z-dimension with size {z_size}")
-                
-                # Find which axis matches the z-size
-                for i, dim_size in enumerate(image_data.shape):
-                    if dim_size == z_size:
-                        if verbose:
-                            print(f"Found matching z-dimension at axis {i}")
-                        return i
-    
-    # Final fallback: look for dimension that could be z-stack
-    if verbose:
-        print("Using fallback z-axis detection...")
-    if image_data.ndim >= 3:
-        # Look for a dimension that could be z (typically > 1 but reasonable for z-stack)
-        for i, dim_size in enumerate(image_data.shape):
-            if 2 <= dim_size <= 100:  # Reasonable z-stack range
-                if verbose:
-                    print(f"Fallback: assuming axis {i} (size {dim_size}) is z-axis")
-                return i
-    
-    if verbose:
-        print("No z-dimension detected")
-        print("=== END Z-AXIS DEBUG ===")
-    return None
+    except Exception as e:
+        print(f"Deconvolution failed: {e}")
+        return image.copy()
 
-def _normalize_to_uint8(image: np.ndarray) -> np.ndarray:
+def background_correction(image: np.ndarray, channel_index: int, ball_radius: int = 50) -> np.ndarray:
     """
-    Normalize image to uint8 format.
+    Apply rolling ball background subtraction to remove uneven illumination.
+    
+    PROCESSING ORDER: Apply SECOND in preprocessing pipeline (after deconvolution, before normalization)
+    IMPORTANCE: CRITICAL for homogeneity analysis - spatial artifacts will appear as false heterogeneity
     
     Args:
-        image: Input image array
+        image: Input image as numpy array (uint8 format expected)
+        channel_index: Index of the channel to process (0-based)
+        ball_radius: Radius of the rolling ball for background estimation
+                    Recommendation: ~1.5x average nucleus diameter (typically 30-100 pixels)
     
     Returns:
-        numpy.ndarray: Image normalized to uint8 (0-255)
+        numpy.ndarray: Background-corrected image in uint8 format
+        
+    Recommended Usage:
+        Essential step before any intensity-based analysis. Set ball_radius to be larger
+        than your largest nucleus to avoid removing actual biological signal.
     """
-    # Handle different input types
-    if image.dtype == np.uint8:
-        return image
+    if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
+        raise ValueError("Input image must be a numpy array of dtype uint8")
     
-    # Normalize to 0-1 range
-    img_min, img_max = image.min(), image.max()
-    if img_max > img_min:
-        normalized = (image - img_min) / (img_max - img_min)
+    # Extract specific channel for processing
+    if image.ndim == 3:
+        if channel_index < 0 or channel_index >= image.shape[2]:
+            raise ValueError(f"Channel index {channel_index} is out of range for image with {image.shape[2]} channels")
+        processed_image = image[:, :, channel_index]
+    elif image.ndim == 2:
+        processed_image = image
+        if channel_index != 0:
+            print(f"Warning: channel_index={channel_index} specified for 2D image, using single channel")
     else:
-        normalized = np.zeros_like(image, dtype=np.float64)
+        raise ValueError(f"Unsupported image dimensions: {image.ndim}")
     
-    # Scale to 0-255 and convert to uint8
-    return (normalized * 255).astype(np.uint8)
+    try:
+        # Apply rolling ball background subtraction
+        # Note: rolling_ball expects float input, returns float output
+        processed_float = processed_image.astype(np.float64)
+        
+        # Create rolling ball structuring element
+        ball = disk(ball_radius)
+        
+        # Estimate background using rolling ball
+        background = rolling_ball(processed_float, radius=ball_radius)
+        
+        # Subtract background
+        corrected = processed_float - background
+        
+        # Ensure non-negative values and convert back to uint8
+        corrected = np.maximum(corrected, 0)
+        corrected = np.clip(corrected, 0, 255).astype(np.uint8)
+        
+        # Restore original shape if multi-channel
+        if image.ndim == 3:
+            output = image.copy()
+            output[:, :, channel_index] = corrected
+            return output
+        else:
+            return corrected
+            
+    except Exception as e:
+        print(f"Background correction failed: {e}")
+        return image.copy()
 
-
-def batch_collapse_z_axis(nd2_readers: list, 
-                         method: str = 'max',
-                         channel: Optional[int] = None,
-                         verbose: bool = True) -> list:
+def intensity_normalization(image: np.ndarray, channel_index: int, method: str = 'percentile', 
+                                           percentile_range: tuple = (1, 99), target_mean: float = 128.0) -> np.ndarray:
     """
-    Collapse z-axis for multiple ND2 files.
+    Apply intensity normalization to correct for staining/loading variations.
+    
+    PROCESSING ORDER: Apply LAST in standard preprocessing pipeline (after background correction)
+    ALTERNATIVE: Use per_nucleus_intensity_normalization() instead for homogeneity analysis
     
     Args:
-        nd2_readers: List of ND2Reader objects
-        method: Projection method ('max', 'mean', 'sum', 'median')
-        channel: Specific channel to process (None = all channels)
-        verbose: Whether to print detailed debug information
+        image: Input image as numpy array (uint8 format expected)
+        channel_index: Index of the channel to process (0-based)
+        method: Normalization method ('percentile', 'zscore', 'minmax', 'target_mean')
+        percentile_range: For percentile method, the (low, high) percentiles to clip
+        target_mean: For target_mean method, the desired mean intensity
     
     Returns:
-        list: List of collapsed images (numpy arrays)
+        numpy.ndarray: Intensity-normalized image in uint8 format
+        
+    Recommended Usage:
+        Use for comparing images across experiments. For homogeneity analysis within nuclei,
+        prefer per_nucleus_intensity_normalization() after segmentation instead.
     """
-    collapsed_images = []
+    if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
+        raise ValueError("Input image must be a numpy array of dtype uint8")
     
-    for i, nd2_reader in enumerate(nd2_readers):
+    # Extract specific channel for processing
+    if image.ndim == 3:
+        if channel_index < 0 or channel_index >= image.shape[2]:
+            raise ValueError(f"Channel index {channel_index} is out of range for image with {image.shape[2]} channels")
+        processed_image = image[:, :, channel_index].astype(np.float64)
+    elif image.ndim == 2:
+        processed_image = image.astype(np.float64)
+        if channel_index != 0:
+            print(f"Warning: channel_index={channel_index} specified for 2D image, using single channel")
+    else:
+        raise ValueError(f"Unsupported image dimensions: {image.ndim}")
+    
+    try:
+        if method == 'percentile':
+            # Percentile-based normalization (robust to outliers)
+            low_val = np.percentile(processed_image, percentile_range[0])
+            high_val = np.percentile(processed_image, percentile_range[1])
+            
+            # Clip and rescale
+            normalized = np.clip(processed_image, low_val, high_val)
+            normalized = (normalized - low_val) / (high_val - low_val) * 255
+            
+        elif method == 'zscore':
+            # Z-score normalization
+            mean_val = np.mean(processed_image)
+            std_val = np.std(processed_image)
+            
+            if std_val > 0:
+                normalized = (processed_image - mean_val) / std_val
+                # Rescale to 0-255 range (keep 3 standard deviations)
+                normalized = np.clip(normalized, -3, 3)
+                normalized = (normalized + 3) / 6 * 255
+            else:
+                normalized = processed_image
+                
+        elif method == 'minmax':
+            # Min-max normalization
+            min_val = np.min(processed_image)
+            max_val = np.max(processed_image)
+            
+            if max_val > min_val:
+                normalized = (processed_image - min_val) / (max_val - min_val) * 255
+            else:
+                normalized = processed_image
+                
+        elif method == 'target_mean':
+            # Normalize to achieve target mean while preserving relative intensities
+            current_mean = np.mean(processed_image)
+            
+            if current_mean > 0:
+                scale_factor = target_mean / current_mean
+                normalized = processed_image * scale_factor
+                normalized = np.clip(normalized, 0, 255)
+            else:
+                normalized = processed_image
+                
+        else:
+            raise ValueError(f"Unknown normalization method: {method}")
+        
+        # Convert back to uint8
+        result = np.clip(normalized, 0, 255).astype(np.uint8)
+        
+        # Restore original shape if multi-channel
+        if image.ndim == 3:
+            output = image.copy()
+            output[:, :, channel_index] = result
+            return output
+        else:
+            return result
+            
+    except Exception as e:
+        print(f"Intensity normalization failed: {e}")
+        return image.copy()
+
+def bulk_preprocess_images(images: list, channel_index: int, methods: list = ['background_correction'], 
+                          verbose: bool = True, **kwargs) -> list:
+    """
+    Apply preprocessing to a list of images using specified methods.
+    
+    RECOMMENDED METHOD ORDER: ['deconvolution', 'background_correction', 'intensity_normalization']
+    FOR HOMOGENEITY ANALYSIS: ['background_correction'] only, then use per_nucleus_intensity_normalization()
+    
+    Args:
+        images: List of input images as numpy arrays (uint8 format expected)
+        channel_index: Index of the channel to process (0-based)
+        methods: List of preprocessing methods to apply in order
+                Available: 'deconvolution', 'background_correction', 'intensity_normalization'
+                Recommended order: Apply deconvolution first, background_correction second, 
+                intensity_normalization last
+        verbose: Whether to print progress information
+        **kwargs: Additional parameters for specific preprocessing methods:
+                 - deconv_sigma: Standard deviation for deconvolution PSF (default: 1.0)
+                 - deconv_iterations: Iterations for deconvolution (default: 10)
+                 - bg_ball_radius: Rolling ball radius for background correction (default: 50)
+                 - norm_method: Normalization method (default: 'percentile')
+                 - norm_percentile_range: Percentile range for normalization (default: (1, 99))
+                 - norm_target_mean: Target mean for target_mean normalization (default: 128.0)
+    
+    Returns:
+        list: List of preprocessed images
+        
+    Example Usage:
+        # Standard workflow
+        preprocessed = bulk_preprocess_images(
+            images, channel_index=0,
+            methods=['background_correction', 'intensity_normalization']
+        )
+        
+        # For homogeneity analysis (skip global normalization)
+        bg_corrected = bulk_preprocess_images(
+            images, channel_index=0,
+            methods=['background_correction']
+        )
+    """
+    if not methods:
         if verbose:
-            print(f"\n=== Processing file {i+1}/{len(nd2_readers)} ===")
-            print(f"File: {getattr(nd2_reader, 'filename', 'Unknown')}")
+            print("No preprocessing methods specified, returning original images")
+        return [img.copy() if img is not None else None for img in images]
+    
+    # Extract kwargs for each method
+    deconv_sigma = kwargs.get('deconv_sigma', 1.0)
+    deconv_iterations = kwargs.get('deconv_iterations', 10)
+    bg_ball_radius = kwargs.get('bg_ball_radius', 50)
+    norm_method = kwargs.get('norm_method', 'percentile')
+    norm_percentile_range = kwargs.get('norm_percentile_range', (1, 99))
+    norm_target_mean = kwargs.get('norm_target_mean', 128.0)
+    
+    if verbose:
+        methods_str = " → ".join(methods)
+        print(f"Preprocessing {len(images)} images: {methods_str} (channel {channel_index})")
+    
+    processed_images = []
+    
+    for i, img in enumerate(images):
+        if img is None:
+            print(f"Skipping None image at index {i}")
+            processed_images.append(None)
+            continue
             
         try:
-            collapsed = collapse_z_axis(nd2_reader, method=method, channel=channel, verbose=verbose)
-            collapsed_images.append(collapsed)
+            current_img = img.copy()
             
-            if verbose:
-                print(f"✓ Successfully processed file {i+1}/{len(nd2_readers)}")
-            else:
-                print(f"Processed {i+1}/{len(nd2_readers)}: {getattr(nd2_reader, 'filename', 'Unknown')}")
+            # Apply each preprocessing method in sequence
+            for method in methods:
+                if method == 'deconvolution':
+                    current_img = deconvolution(
+                        current_img, channel_index, sigma=deconv_sigma, iterations=deconv_iterations
+                    )
+                elif method == 'background_correction':
+                    current_img = background_correction(
+                        current_img, channel_index, ball_radius=bg_ball_radius
+                    )
+                elif method == 'intensity_normalization':
+                    current_img = intensity_normalization(
+                        current_img, channel_index, method=norm_method, 
+                        percentile_range=norm_percentile_range, target_mean=norm_target_mean
+                    )
+                else:
+                    print(f"Warning: Unknown preprocessing method '{method}', skipping")
+            
+            processed_images.append(current_img)
+            
+            if verbose and (i + 1) % 5 == 0:  # Progress update every 5 images
+                print(f"Preprocessed {i + 1}/{len(images)} images")
                 
         except Exception as e:
-            print(f"✗ Error processing file {i+1}: {e}")
-            collapsed_images.append(None)
+            print(f"Error preprocessing image {i + 1}: {e}")
+            processed_images.append(img.copy() if img is not None else None)
     
-    return collapsed_images
+    if verbose:
+        successful = sum(1 for img in processed_images if img is not None)
+        print(f"Successfully preprocessed {successful}/{len(images)} images")
+    
+    return processed_images
+
+
+def per_nucleus_intensity_normalization(image: np.ndarray, 
+                                      labels: np.ndarray, 
+                                      target_mean: float = 1.0,
+                                      noise_floor: float = 0.01,
+                                      min_nucleus_size: int = 50,
+                                      verbose: bool = False) -> Tuple[np.ndarray, dict]:
+    """
+    Apply per-nucleus intensity normalization to make intensity-based features
+    comparable across nuclei by focusing on distribution patterns rather than absolute brightness.
+    
+    PROCESSING ORDER: Apply AFTER background_correction() and segmentation, INSTEAD OF intensity_normalization()
+    PURPOSE: Optimized for homogeneity analysis within individual nuclei
+    
+    This function normalizes each segmented nucleus individually by rescaling intensities
+    within each nucleus to have a consistent mean value. This is particularly useful for
+    homogeneity analysis where you want to compare coefficient of variation (CV) and 
+    high-intensity fractions across different nuclei.
+    
+    Args:
+        image: Input image as numpy array (background-corrected intensities recommended)
+        labels: Integer label mask of same shape where each pixel is assigned a nucleus ID (0 = background)
+        target_mean: Target mean intensity value for each nucleus after normalization (default: 1.0)
+                    Recommendation: Use 1.0 for intuitive CV calculations
+        noise_floor: Minimum mean intensity threshold - nuclei below this are skipped (default: 0.01)
+        min_nucleus_size: Minimum number of pixels required for a nucleus to be processed (default: 50)
+        verbose: Whether to print processing information
+    
+    Returns:
+        Tuple containing:
+        - normalized_image: numpy.ndarray with per-nucleus normalized intensities (float dtype)
+        - stats: dict with normalization statistics per nucleus
+                {'nucleus_id': {'original_mean': float, 'scale_factor': float, 'pixel_count': int}}
+    
+    Recommended Workflow:
+        1. Apply background_correction() to raw image
+        2. Perform segmentation to generate labels
+        3. Apply this function instead of global intensity_normalization()
+        4. Proceed with homogeneity measurements (CV, texture analysis, etc.)
+    
+    Notes:
+        - Input image should be background-corrected first for best results
+        - Resulting normalized image will have dtype float64 with mean ≈ target_mean per nucleus
+        - Use this AFTER standard preprocessing but INSTEAD of global intensity_normalization
+        - With target_mean=1.0, CV = std_dev (simplifies downstream calculations)
+    """
+    if not isinstance(image, np.ndarray) or not isinstance(labels, np.ndarray):
+        raise ValueError("Both image and labels must be numpy arrays")
+    
+    if image.shape != labels.shape:
+        raise ValueError(f"Image shape {image.shape} must match labels shape {labels.shape}")
+    
+    # Convert image to float for processing
+    if image.dtype == np.uint8:
+        img_float = image.astype(np.float64) / 255.0
+    elif image.dtype == np.uint16:
+        img_float = image.astype(np.float64) / 65535.0
+    else:
+        img_float = image.astype(np.float64)
+    
+    # Initialize output array
+    normalized_image = np.zeros_like(img_float, dtype=np.float64)
+    
+    # Dictionary to store statistics
+    stats = {}
+    
+    # Get unique nucleus labels (excluding background = 0)
+    nucleus_ids = np.unique(labels)
+    nucleus_ids = nucleus_ids[nucleus_ids > 0]
+    
+    if verbose:
+        print(f"Processing {len(nucleus_ids)} nuclei for per-nucleus normalization")
+    
+    processed_count = 0
+    skipped_count = 0
+    
+    for nucleus_id in nucleus_ids:
+        # Get pixel coordinates for this nucleus
+        mask = labels == nucleus_id
+        nucleus_pixels = img_float[mask]
+        
+        # Quality control checks
+        pixel_count = len(nucleus_pixels)
+        if pixel_count < min_nucleus_size:
+            if verbose:
+                print(f"Skipping nucleus {nucleus_id}: too small ({pixel_count} pixels)")
+            skipped_count += 1
+            continue
+        
+        # Calculate mean intensity
+        original_mean = np.mean(nucleus_pixels)
+        
+        if original_mean <= noise_floor:
+            if verbose:
+                print(f"Skipping nucleus {nucleus_id}: below noise floor ({original_mean:.4f})")
+            skipped_count += 1
+            continue
+        
+        # Calculate normalization factor
+        scale_factor = target_mean / original_mean
+        
+        # Apply normalization
+        normalized_pixels = nucleus_pixels * scale_factor
+        
+        # Write back to output image
+        normalized_image[mask] = normalized_pixels
+        
+        # Store statistics
+        stats[int(nucleus_id)] = {
+            'original_mean': float(original_mean),
+            'scale_factor': float(scale_factor),
+            'pixel_count': int(pixel_count),
+            'normalized_mean': float(np.mean(normalized_pixels))
+        }
+        
+        processed_count += 1
+        
+        if verbose and processed_count % 100 == 0:
+            print(f"Processed {processed_count} nuclei...")
+    
+    if verbose:
+        print(f"✓ Successfully normalized {processed_count} nuclei")
+        print(f"✗ Skipped {skipped_count} nuclei (size/noise filters)")
+        
+        if processed_count > 0:
+            scale_factors = [s['scale_factor'] for s in stats.values()]
+            print(f"Scale factor range: {np.min(scale_factors):.3f} - {np.max(scale_factors):.3f}")
+            print(f"Mean scale factor: {np.mean(scale_factors):.3f} ± {np.std(scale_factors):.3f}")
+    
+    return normalized_image, stats

@@ -252,4 +252,102 @@ def plot_image_mask(image: np.ndarray,
     
     # Display the plot
     plt.show()
+
+
+def plot_preprocessing_comparison(original_image: np.ndarray,
+                                global_preprocessed: np.ndarray,
+                                per_nucleus_preprocessed: np.ndarray,
+                                labels: np.ndarray,
+                                title: str = "Preprocessing Comparison",
+                                figsize: Tuple[int, int] = (18, 12),
+                                save_path: Optional[str] = None) -> None:
+    """
+    Compare original, globally preprocessed, and per-nucleus preprocessed images.
+    
+    Args:
+        original_image: Original image after z-collapse
+        global_preprocessed: Image after global preprocessing (background correction + normalization)
+        per_nucleus_preprocessed: Image after per-nucleus normalization
+        labels: Segmentation labels for overlay
+        title: Title for the entire figure
+        figsize: Figure size as (width, height) tuple
+        save_path: Optional path to save the figure
+    """
+    fig, axes = plt.subplots(2, 3, figsize=figsize)
+    
+    # Ensure all images are 2D for display
+    orig_2d = original_image.squeeze() if original_image.ndim > 2 else original_image
+    global_2d = global_preprocessed.squeeze() if global_preprocessed.ndim > 2 else global_preprocessed
+    per_nucleus_2d = per_nucleus_preprocessed.squeeze() if per_nucleus_preprocessed.ndim > 2 else per_nucleus_preprocessed
+    
+    # Top row: Raw images
+    axes[0, 0].imshow(orig_2d, cmap='gray')
+    axes[0, 0].set_title('Original (Z-collapsed)')
+    axes[0, 0].axis('off')
+    
+    axes[0, 1].imshow(global_2d, cmap='gray')
+    axes[0, 1].set_title('Global Preprocessing\n(Background + Intensity Norm)')
+    axes[0, 1].axis('off')
+    
+    axes[0, 2].imshow(per_nucleus_2d, cmap='gray')
+    axes[0, 2].set_title('Per-Nucleus Normalization\n(Mean = 1.0 per nucleus)')
+    axes[0, 2].axis('off')
+    
+    # Bottom row: With segmentation overlays
+    # Original with overlay
+    overlay_orig = np.stack([orig_2d, orig_2d, orig_2d], axis=2)
+    boundaries = (labels > 0).astype(bool)
+    if overlay_orig.dtype == np.uint8:
+        overlay_orig[boundaries] = [255, 100, 100]  # Red boundaries
+    else:
+        max_val = overlay_orig.max()
+        overlay_orig[boundaries] = [max_val, max_val*0.4, max_val*0.4]
+    
+    axes[1, 0].imshow(overlay_orig)
+    axes[1, 0].set_title(f'Original + Segmentation\n({len(np.unique(labels))-1} nuclei)')
+    axes[1, 0].axis('off')
+    
+    # Global preprocessed with overlay
+    overlay_global = np.stack([global_2d, global_2d, global_2d], axis=2)
+    if overlay_global.dtype == np.uint8:
+        overlay_global[boundaries] = [255, 100, 100]
+    else:
+        max_val = overlay_global.max()
+        overlay_global[boundaries] = [max_val, max_val*0.4, max_val*0.4]
+    
+    axes[1, 1].imshow(overlay_global)
+    axes[1, 1].set_title('Global Preprocessing + Segmentation')
+    axes[1, 1].axis('off')
+    
+    # Per-nucleus with intensity statistics
+    overlay_per_nucleus = np.stack([per_nucleus_2d, per_nucleus_2d, per_nucleus_2d], axis=2)
+    if overlay_per_nucleus.dtype == np.uint8:
+        overlay_per_nucleus[boundaries] = [255, 100, 100]
+    else:
+        max_val = overlay_per_nucleus.max()
+        overlay_per_nucleus[boundaries] = [max_val, max_val*0.4, max_val*0.4]
+    
+    axes[1, 2].imshow(overlay_per_nucleus)
+    
+    # Calculate some statistics for per-nucleus image
+    nucleus_ids = np.unique(labels)[1:]  # Skip background
+    cvs = []
+    for nid in nucleus_ids[:10]:  # Sample first 10 nuclei for stats
+        nucleus_pixels = per_nucleus_2d[labels == nid]
+        if len(nucleus_pixels) > 0:
+            cv = np.std(nucleus_pixels) / np.mean(nucleus_pixels) if np.mean(nucleus_pixels) > 0 else 0
+            cvs.append(cv)
+    
+    mean_cv = np.mean(cvs) if cvs else 0
+    axes[1, 2].set_title(f'Per-Nucleus + Segmentation\n(Sample CV: {mean_cv:.3f})')
+    axes[1, 2].axis('off')
+    
+    plt.suptitle(title, fontsize=16, y=0.95)
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved preprocessing comparison to: {save_path}")
+    
+    plt.show()
     
