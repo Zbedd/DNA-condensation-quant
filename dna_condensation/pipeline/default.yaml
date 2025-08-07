@@ -10,12 +10,26 @@ temp_path: "./temp"             # Temporary processing files
 # ==== MICROSCOPE SETTINGS ====
 # Adjust these based on your microscope configuration
 image_channels:
-  - "Channel_0"    # DNA staining channel
-  - "Channel_1"    # LSD1 GFP channel
+  - "Channel_0"    # LSD1 GFP channel
+  - "Channel_1"    # DNA staining channel
 
 # ==== SEGMENTATION SETTINGS ====
 # Channel selection for nucleus segmentation
-segmentation_channel_index: 0   # index to use for quantification 
+segmentation_channel_index: 1   # index to use for quantification (1 = DNA staining channel) 
+# Segmentation method: 'yolo' (AI-based) or 'watershed' (traditional image processing)
+segmentation_method: "otsu"    # Options: "yolo", "watershed" 
+
+# Size-based filtering (removes small objects relative to median size)
+size_filtering:
+  enabled: true                 # Enable/disable size-based filtering
+  min_size_percentage: 20       # Minimum size as percentage of median (e.g., 20 = 20% of median) 
+
+#=== SIZE FILTERING SUMMARY EXAMPLE ===
+# Original objects: 66
+#  5% filter:  66 objects (  0.0% removed)
+# 10% filter:  66 objects (  0.0% removed)
+# 20% filter:  64 objects (  3.0% removed)
+# 30% filter:  62 objects (  6.1% removed)
 
 # ==== PROCESSING SETTINGS ====
 # Z-axis collapse method

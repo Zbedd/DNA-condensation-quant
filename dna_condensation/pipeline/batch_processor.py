@@ -38,7 +38,7 @@ Channel information:
 '''
 
 def main():
-  nd2_folder_path = config.get("raw_nd2_path", None)
+  nd2_folder_path = config.get("raw_nd2_path")
 
   # # Iterate over every ND2 file and check channel count consistency
   # nd2_files = [f for f in os.listdir(nd2_folder_path) if f.lower().endswith('.nd2')]
@@ -69,10 +69,18 @@ def main():
   print(f"Collapsing z-axis for {len(nd2_objects)} ND2 files")
   collapsed_images = batch_collapse_z_axis(nd2_objects, method='mean')
   
-  # Get segmentation channel index from config
-  channel_index = config.get("segmentation_channel_index", 0)
-  print(f'Segmenting collapsed images with YOLO model (using channel {channel_index})')
-  masks = bulk_segment_images(collapsed_images, channel_index=channel_index)
+  # Get segmentation parameters from config
+  channel_index = config.get("segmentation_channel_index")
+  segmentation_method = config.get("segmentation_method")
+  
+  # Get size filtering configuration
+  size_filter_config = config.get("size_filtering")
+  
+  filter_status = f"with {size_filter_config.get('min_size_percentage')}% size filter" if size_filter_config.get('enabled') else "no size filtering"
+  print(f'Segmenting collapsed images with {segmentation_method.upper()} model (using channel {channel_index}, {filter_status})')
+  
+  masks = bulk_segment_images(collapsed_images, channel_index=channel_index, method=segmentation_method, 
+                             size_filter_config=size_filter_config)
 
   # Prepare image for visualization - extract the same channel used for segmentation
   first_image = collapsed_images[0]
