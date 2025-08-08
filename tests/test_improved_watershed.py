@@ -5,8 +5,8 @@ sys.path.append('c:/VScode/DNA-condensation-quant')
 
 from dna_condensation.pipeline.config import Config
 from dna_condensation.core.image_loader import get_nd2_objects
-from dna_condensation.core.preprocessor import collapse_z_axis
-from dna_condensation.core.segmentation import segment_image
+from dna_condensation.core.z_stack_handling import collapse_z_axis
+from dna_condensation.core.segmentation import segment_image_watershed
 
 def test_improved_watershed():
     """Test the improved watershed segmentation."""
@@ -31,9 +31,9 @@ def test_improved_watershed():
     print(f"\n--- Testing Improved Watershed Segmentation ---")
     try:
         # Test with labeled output
-        watershed_labels = segment_image(collapsed_image, channel_index=channel_index, 
+        watershed_labels = segment_image_watershed(collapsed_image, channel_index=channel_index, 
                                        method='watershed', return_labels=True)
-        watershed_binary = segment_image(collapsed_image, channel_index=channel_index, 
+        watershed_binary = segment_image_watershed(collapsed_image, channel_index=channel_index, 
                                        method='watershed', return_labels=False)
         
         num_objects = len(np.unique(watershed_labels)) - 1  # Subtract background

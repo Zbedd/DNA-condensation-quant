@@ -5,7 +5,7 @@ sys.path.append('c:/VScode/DNA-condensation-quant')
 
 from dna_condensation.pipeline.config import Config
 from dna_condensation.core.image_loader import get_nd2_objects
-from dna_condensation.core.preprocessor import collapse_z_axis
+from dna_condensation.core.z_stack_handling import collapse_z_axis
 from dna_condensation.core.segmentation import bulk_segment_images
 
 def test_batch_with_size_filtering():
@@ -31,7 +31,7 @@ def test_batch_with_size_filtering():
     for nd2 in test_files:
         img = None
         try:
-            from dna_condensation.core.preprocessor import collapse_z_axis
+            from dna_condensation.core.z_stack_handling import collapse_z_axis
             img = collapse_z_axis(nd2, method='mean', verbose=False)
             collapsed_images.append(img)
         except Exception as e:

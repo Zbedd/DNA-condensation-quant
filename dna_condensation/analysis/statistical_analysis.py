@@ -1,0 +1,506 @@
+"""
+Statistical analysis for DNA condensation data.
+
+This module provides comprehensive statistical analysis tools for comparing
+DNA condensation features across experimental conditions.
+"""
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+import warnings
+from typing import Dict, List, Tuple, Optional, Union
+
+class DNACondensationStatistics:
+    """
+    Statistical analysis tools for DNA condensation feature data.
+    
+    Provides methods for:
+    - Descriptive statistics and quality control
+    - Hypothesis testing (parametric and non-parametric)
+    - Multiple comparison correction
+    - Multivariate analysis (PCA, clustering)
+    - Effect size calculations
+    """
+    
+    def __init__(self, alpha: float = 0.05):
+        """
+        Initialize statistical analysis.
+        
+        Parameters:
+        -----------
+        alpha : float
+            Significance level for hypothesis testing
+        """
+        self.alpha = alpha
+        self.results = {}
+        
+    def quality_control(self, df: pd.DataFrame, 
+                       outlier_threshold: float = 3.0) -> pd.DataFrame:
+        """
+        Perform quality control on feature data.
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Feature dataframe with nucleus-level data
+        outlier_threshold : float
+            Standard deviations for outlier detection
+            
+        Returns:
+        --------
+        pd.DataFrame
+            Filtered dataframe with outliers removed
+        """
+        print("=== Quality Control ===")
+        print(f"Initial data: {len(df)} nuclei")
+        
+        # Check for missing values
+        missing_counts = df.isnull().sum()
+        if missing_counts.any():
+            print(f"Missing values found in {missing_counts[missing_counts > 0].to_dict()}")
+        
+        # Remove nuclei with extreme area (likely segmentation errors)
+        if 'area' in df.columns:
+            area_mean = df['area'].mean()
+            area_std = df['area'].std()
+            area_outliers = np.abs(df['area'] - area_mean) > outlier_threshold * area_std
+            df = df[~area_outliers]
+            print(f"Removed {area_outliers.sum()} nuclei with extreme area")
+        
+        # Remove nuclei with very low signal
+        if 'mean_intensity' in df.columns:
+            intensity_outliers = df['mean_intensity'] < np.percentile(df['mean_intensity'], 1)
+            df = df[~intensity_outliers]
+            print(f"Removed {intensity_outliers.sum()} nuclei with very low signal")
+        
+        # Check normalization (if per-nucleus normalization was applied)
+        if 'mean_intensity' in df.columns:
+            overall_mean = df['mean_intensity'].mean()
+            print(f"Overall mean intensity after QC: {overall_mean:.3f}")
+            if abs(overall_mean - 1.0) > 0.1:
+                warnings.warn(f"Mean intensity ({overall_mean:.3f}) differs from expected 1.0")
+        
+        print(f"Final data: {len(df)} nuclei")
+        return df
+    
+    def descriptive_statistics(self, df: pd.DataFrame, 
+                              group_column: str = 'condition') -> pd.DataFrame:
+        """
+        Generate descriptive statistics by group.
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Feature dataframe
+        group_column : str
+            Column name for grouping (e.g., 'condition', 'dk_group')
+            
+        Returns:
+        --------
+        pd.DataFrame
+            Descriptive statistics table
+        """
+        # Select numeric columns for analysis
+        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        feature_cols = [col for col in numeric_cols if col not in 
+                       ['nucleus_id', 'centroid_x', 'centroid_y', 'dk_number', 'well']]
+        
+        # Group by condition and calculate statistics
+        desc_stats = []
+        
+        for group in df[group_column].unique():
+            group_data = df[df[group_column] == group]
+            n_nuclei = len(group_data)
+            n_images = group_data['image_name'].nunique() if 'image_name' in group_data.columns else 1
+            
+            for feature in feature_cols:
+                values = group_data[feature].dropna()
+                if len(values) > 0:
+                    desc_stats.append({
+                        'group': group,
+                        'feature': feature,
+                        'n_nuclei': n_nuclei,
+                        'n_images': n_images,
+                        'mean': values.mean(),
+                        'std': values.std(),
+                        'median': values.median(),
+                        'q25': values.quantile(0.25),
+                        'q75': values.quantile(0.75),
+                        'min': values.min(),
+                        'max': values.max(),
+                        'cv': values.std() / values.mean() if values.mean() != 0 else np.nan
+                    })
+        
+        return pd.DataFrame(desc_stats)
+    
+    def test_normality(self, df: pd.DataFrame, 
+                      features: List[str],
+                      group_column: str = 'condition') -> pd.DataFrame:
+        """
+        Test normality of feature distributions by group.
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Feature dataframe
+        features : List[str]
+            List of feature columns to test
+        group_column : str
+            Column for grouping
+            
+        Returns:
+        --------
+        pd.DataFrame
+            Normality test results
+        """
+        normality_results = []
+        
+        for feature in features:
+            for group in df[group_column].unique():
+                group_data = df[df[group_column] == group][feature].dropna()
+                
+                if len(group_data) > 3:  # Minimum for Shapiro-Wilk
+                    try:
+                        statistic, p_value = stats.shapiro(group_data)
+                        normality_results.append({
+                            'group': group,
+                            'feature': feature,
+                            'n': len(group_data),
+                            'shapiro_statistic': statistic,
+                            'shapiro_p_value': p_value,
+                            'is_normal': p_value > self.alpha
+                        })
+                    except Exception as e:
+                        warnings.warn(f"Normality test failed for {feature} in {group}: {e}")
+        
+        return pd.DataFrame(normality_results)
+    
+    def compare_groups(self, df: pd.DataFrame,
+                      features: List[str],
+                      group_column: str = 'condition',
+                      test_type: str = 'auto') -> pd.DataFrame:
+        """
+        Compare features between groups using appropriate statistical tests.
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Feature dataframe
+        features : List[str]
+            Features to compare
+        group_column : str
+            Column for grouping
+        test_type : str
+            'auto', 'parametric', or 'nonparametric'
+            
+        Returns:
+        --------
+        pd.DataFrame
+            Statistical comparison results
+        """
+        groups = df[group_column].unique()
+        comparison_results = []
+        
+        # Test normality if auto mode
+        if test_type == 'auto':
+            normality_df = self.test_normality(df, features, group_column)
+        else:
+            normality_df = pd.DataFrame()  # Empty DataFrame for non-auto modes
+        
+        for feature in features:
+            feature_data = df[feature].dropna()
+            if len(feature_data) == 0:
+                continue
+                
+            # Prepare data for comparison
+            group_data = []
+            group_names = []
+            
+            for group in groups:
+                group_values = df[df[group_column] == group][feature].dropna()
+                if len(group_values) > 0:
+                    group_data.append(group_values)
+                    group_names.append(group)
+            
+            if len(group_data) < 2:
+                continue
+                
+            # Determine test type
+            if test_type == 'auto':
+                # Check if all groups are normally distributed
+                feature_normality = normality_df[normality_df['feature'] == feature]
+                all_normal = feature_normality['is_normal'].all() if len(feature_normality) > 0 else False
+                use_parametric = all_normal
+            elif test_type == 'parametric':
+                use_parametric = True
+            else:
+                use_parametric = False
+            
+            # Perform statistical test
+            if len(group_data) == 2:
+                # Two-group comparison
+                if use_parametric:
+                    # Equal variance test
+                    _, levene_p = stats.levene(group_data[0], group_data[1])
+                    equal_var = levene_p > self.alpha
+                    
+                    # t-test
+                    statistic, p_value = stats.ttest_ind(group_data[0], group_data[1], 
+                                                       equal_var=equal_var)
+                    test_name = f"t-test ({'equal' if equal_var else 'unequal'} variance)"
+                else:
+                    # Mann-Whitney U test
+                    statistic, p_value = stats.mannwhitneyu(group_data[0], group_data[1], 
+                                                          alternative='two-sided')
+                    test_name = "Mann-Whitney U"
+                    
+            else:
+                # Multi-group comparison
+                if use_parametric:
+                    # One-way ANOVA
+                    statistic, p_value = stats.f_oneway(*group_data)
+                    test_name = "One-way ANOVA"
+                else:
+                    # Kruskal-Wallis test
+                    statistic, p_value = stats.kruskal(*group_data)
+                    test_name = "Kruskal-Wallis"
+            
+            # Calculate effect size (Cohen's d for two groups, eta-squared for multiple)
+            effect_size = self._calculate_effect_size(group_data, use_parametric)
+            
+            comparison_results.append({
+                'feature': feature,
+                'test': test_name,
+                'statistic': statistic,
+                'p_value': p_value,
+                'effect_size': effect_size,
+                'n_groups': len(group_data),
+                'total_n': sum(len(g) for g in group_data)
+            })
+        
+        results_df = pd.DataFrame(comparison_results)
+        
+        # Multiple comparison correction
+        if len(results_df) > 1:
+            results_df = self._apply_multiple_comparison_correction(results_df)
+        
+        # Store results
+        self.results['group_comparisons'] = results_df
+        
+        return results_df
+    
+    def pairwise_comparisons(self, df: pd.DataFrame,
+                           features: List[str],
+                           group_column: str = 'condition') -> pd.DataFrame:
+        """
+        Perform pairwise comparisons between all groups.
+        """
+        groups = df[group_column].unique()
+        pairwise_results = []
+        
+        for feature in features:
+            for i, group1 in enumerate(groups):
+                for j, group2 in enumerate(groups):
+                    if i >= j:  # Avoid duplicate comparisons
+                        continue
+                        
+                    data1 = df[df[group_column] == group1][feature].dropna()
+                    data2 = df[df[group_column] == group2][feature].dropna()
+                    
+                    if len(data1) > 0 and len(data2) > 0:
+                        # Use Mann-Whitney U (conservative choice)
+                        statistic, p_value = stats.mannwhitneyu(data1, data2, 
+                                                              alternative='two-sided')
+                        
+                        # Effect size (rank-biserial correlation for Mann-Whitney)
+                        effect_size = 1 - (2 * statistic) / (len(data1) * len(data2))
+                        
+                        pairwise_results.append({
+                            'feature': feature,
+                            'group1': group1,
+                            'group2': group2,
+                            'statistic': statistic,
+                            'p_value': p_value,
+                            'effect_size': effect_size,
+                            'n1': len(data1),
+                            'n2': len(data2)
+                        })
+        
+        pairwise_df = pd.DataFrame(pairwise_results)
+        
+        # Multiple comparison correction
+        if len(pairwise_df) > 1:
+            pairwise_df = self._apply_multiple_comparison_correction(pairwise_df)
+            
+        return pairwise_df
+    
+    def multivariate_analysis(self, df: pd.DataFrame,
+                            features: List[str],
+                            group_column: str = 'condition') -> Dict:
+        """
+        Perform multivariate analysis (PCA, clustering).
+        """
+        # Prepare data
+        feature_data = df[features].fillna(0)  # Fill NaN with 0
+        
+        # Standardize features
+        scaler = StandardScaler()
+        scaled_data = scaler.fit_transform(feature_data)
+        
+        # PCA
+        pca = PCA()
+        pca_data = pca.fit_transform(scaled_data)
+        
+        # Create PCA results dataframe
+        pca_df = pd.DataFrame(pca_data, columns=[f'PC{i+1}' for i in range(pca_data.shape[1])])
+        pca_df[group_column] = df[group_column].values
+        
+        # K-means clustering
+        n_clusters = min(len(df[group_column].unique()), 4)  # Reasonable number
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        clusters = kmeans.fit_predict(scaled_data)
+        
+        results = {
+            'pca': {
+                'data': pca_df,
+                'explained_variance_ratio': pca.explained_variance_ratio_,
+                'feature_loadings': pd.DataFrame(
+                    pca.components_.T,
+                    columns=[f'PC{i+1}' for i in range(len(pca.components_))],
+                    index=features
+                )
+            },
+            'clustering': {
+                'labels': clusters,
+                'centers': kmeans.cluster_centers_,
+                'inertia': kmeans.inertia_
+            },
+            'scaler': scaler
+        }
+        
+        return results
+    
+    def _calculate_effect_size(self, group_data: List[np.ndarray], 
+                              parametric: bool) -> float:
+        """Calculate appropriate effect size measure."""
+        if len(group_data) == 2:
+            # Cohen's d for two groups
+            group1, group2 = group_data
+            pooled_std = np.sqrt(((len(group1) - 1) * np.var(group1, ddof=1) + 
+                                 (len(group2) - 1) * np.var(group2, ddof=1)) / 
+                                (len(group1) + len(group2) - 2))
+            if pooled_std > 0:
+                return abs(np.mean(group1) - np.mean(group2)) / pooled_std
+            else:
+                return 0
+        else:
+            # Eta-squared for multiple groups
+            all_data = np.concatenate(group_data)
+            grand_mean = np.mean(all_data)
+            
+            # Between-group sum of squares
+            ss_between = sum(len(group) * (np.mean(group) - grand_mean) ** 2 
+                           for group in group_data)
+            
+            # Total sum of squares
+            ss_total = np.sum((all_data - grand_mean) ** 2)
+            
+            if ss_total > 0:
+                return ss_between / ss_total
+            else:
+                return 0
+    
+    def _apply_multiple_comparison_correction(self, results_df: pd.DataFrame) -> pd.DataFrame:
+        """Apply Benjamini-Hochberg correction for multiple comparisons."""
+        from statsmodels.stats.multitest import multipletests
+        
+        # Apply correction
+        rejected, p_corrected, _, _ = multipletests(
+            results_df['p_value'], 
+            alpha=self.alpha, 
+            method='fdr_bh'
+        )
+        
+        results_df['p_corrected'] = p_corrected
+        results_df['significant'] = rejected
+        
+        return results_df
+    
+    def generate_summary_report(self, df: pd.DataFrame,
+                               features: List[str],
+                               group_column: str = 'condition') -> str:
+        """Generate a comprehensive statistical summary report."""
+        
+        report = []
+        report.append("=" * 60)
+        report.append("DNA CONDENSATION STATISTICAL ANALYSIS REPORT")
+        report.append("=" * 60)
+        report.append("")
+        
+        # Data overview
+        report.append("DATA OVERVIEW:")
+        report.append(f"  Total nuclei: {len(df)}")
+        report.append(f"  Total images: {df['image_name'].nunique()}")
+        report.append(f"  Groups: {', '.join(df[group_column].unique())}")
+        report.append("")
+        
+        # Group sizes
+        group_counts = df[group_column].value_counts()
+        report.append("GROUP SIZES:")
+        for group, count in group_counts.items():
+            report.append(f"  {group}: {count} nuclei")
+        report.append("")
+        
+        # Key findings from comparisons
+        if 'group_comparisons' in self.results:
+            comp_df = self.results['group_comparisons']
+            significant = comp_df[comp_df['significant'] == True] if 'significant' in comp_df.columns else comp_df[comp_df['p_value'] < self.alpha]
+            
+            report.append("SIGNIFICANT DIFFERENCES:")
+            if len(significant) > 0:
+                for _, row in significant.iterrows():
+                    report.append(f"  {row['feature']}: {row['test']}, p = {row['p_value']:.4f}, effect size = {row['effect_size']:.3f}")
+            else:
+                report.append("  No significant differences found")
+            report.append("")
+        
+        return "\n".join(report)
+
+
+def identify_key_features(comparison_results: pd.DataFrame, 
+                         top_n: int = 10) -> List[str]:
+    """
+    Identify the most important features for distinguishing groups.
+    
+    Parameters:
+    -----------
+    comparison_results : pd.DataFrame
+        Results from group comparisons
+    top_n : int
+        Number of top features to return
+        
+    Returns:
+    --------
+    List[str]
+        List of most discriminative features
+    """
+    # Sort by effect size (descending) and p-value (ascending)
+    if 'p_corrected' in comparison_results.columns:
+        p_col = 'p_corrected'
+    else:
+        p_col = 'p_value'
+        
+    # Create a ranking score combining effect size and significance
+    comparison_results = comparison_results.copy()
+    comparison_results['rank_score'] = (
+        comparison_results['effect_size'] * 
+        (1 - comparison_results[p_col])  # Higher score for lower p-values
+    )
+    
+    top_features = comparison_results.nlargest(top_n, 'rank_score')['feature'].tolist()
+    
+    return top_features

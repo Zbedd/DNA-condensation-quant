@@ -37,9 +37,9 @@ preprocessing:
   background_correction: true   # Apply rolling ball background correction (RECOMMENDED)
   deconvolution: false         # Apply Richardson-Lucy deconvolution (optional, slower)
   intensity_normalization: true # Apply global intensity normalization (recommended for batch comparison)
-  per_nucleus_normalization: true  # Apply per-nucleus normalization for homogeneity analysis
+  per_nucleus_normalization: false  # Apply per-nucleus normalization for homogeneity analysis
   # Advanced parameters
-  bg_ball_radius: 50           # Rolling ball radius (adjust based on nucleus size)
+  bg_ball_radius: 75           # Rolling ball radius (adjust based on nucleus size)
   deconv_iterations: 10        # Deconvolution iterations
   norm_method: "percentile"    # Normalization method: percentile, zscore, minmax, target_mean
 
@@ -51,7 +51,27 @@ use_gpu: true                   # Enable GPU acceleration if available
 
 # Plotting and visualization
 plot:
-  plot_segmentation: true       # Enable/disable segmentation result visualization
+  plot_segmentation: false       # Enable/disable segmentation result visualization
+  single_metric_plot:
+    enabled: true                # Enable/disable single metric standalone plot
+    metric: "glcm_homogeneity_mean"  # Metric to plot (set to null/none to disable)
+    # Available metrics include:
+    # Intensity: mean_intensity, std_intensity, intensity_entropy, high_intensity_fraction, etc.
+    # Morphology: area, perimeter, circularity, solidity, etc.
+    # Texture: glcm_homogeneity_mean, glcm_contrast_mean, glcm_energy_mean, etc.
+    # Granulometry: granulometry_area_fraction_r5, granulometry_spots_r5, etc.
+    # Spatial: radial_shell_0, center_to_edge_ratio, etc.
+  nuclei_panel:
+    enabled: true               # Enable/disable nuclei panel plot
+    n_nuclei: 12                # How many nuclei to show
+    metrics:                    # Metrics to annotate per nucleus
+      - glcm_homogeneity_mean
+      - intensity_entropy
+    group: null                 # Optional group filter; null means sample randomly from all
+    group_column: condition     # Which column stores group labels
+    colormap: magma             # Colormap to emphasize intensity differences
+    channel_index: 1            # Channel to visualize when image has multiple channels
+    save_name: nuclei_panel.png # Output filename
 
 # Verbose output
 verbose: true                   # Print detailed progress information
