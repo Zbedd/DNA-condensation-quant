@@ -80,13 +80,14 @@ def main():
   # Get preprocessing configuration
   preprocessing_config = config.get("preprocessing")
   
-  # Apply global preprocessing if enabled
+  # Apply global preprocessing if enabled in config
   global_preprocessed = None
   if any([preprocessing_config.get("background_correction"), 
           preprocessing_config.get("deconvolution"), 
           preprocessing_config.get("intensity_normalization")]):
     
-    # Build preprocessing methods list based on config
+    # Build sequential preprocessing pipeline based on enabled methods
+    # Order matters: deconvolution → background correction → intensity normalization
     methods = []
     if preprocessing_config.get("deconvolution"):
       methods.append("deconvolution")
@@ -105,25 +106,27 @@ def main():
       norm_method=preprocessing_config.get("norm_method", "percentile")
     )
   else:
+    # Skip preprocessing - use raw collapsed images
     global_preprocessed = collapsed_images
     print("No global preprocessing applied")
   
-  # Get size filtering configuration
+  # Configure size-based filtering to remove segmentation artifacts
   size_filter_config = config.get("size_filtering")
   
-  # Get plotting configuration
+  # Set up visualization options
   plot_config = config.get("plot")
   plot_segmentation = plot_config.get("plot_segmentation") 
   
   filter_status = f"with {size_filter_config.get('min_size_percentage')}% size filter" if size_filter_config.get('enabled') else "no size filtering"
   print(f'Segmenting processed images with {segmentation_method.upper()} model (using channel {channel_index}, {filter_status})')
   
-  # Use globally preprocessed images for segmentation
-  # IMPORTANT: return_labels=True to get labeled masks (each nucleus has unique ID) for proper analysis
+  # Perform segmentation using globally preprocessed images
+  # CRITICAL: return_labels=True ensures each nucleus gets unique ID for per-nucleus feature extraction
   masks = bulk_segment_images(global_preprocessed, channel_index=channel_index, method=segmentation_method, 
                              size_filter_config=size_filter_config, return_labels=True)
 
-  # Apply per-nucleus normalization if enabled
+  # Apply per-nucleus intensity normalization if enabled (alternative to global normalization)
+  # This normalizes each nucleus individually to target_mean, useful for homogeneity analysis
   per_nucleus_preprocessed = None
   per_nucleus_stats = None
   if preprocessing_config.get("per_nucleus_normalization") and masks[0] is not None:
@@ -133,12 +136,14 @@ def main():
     
     for i, (image, labels) in enumerate(zip(global_preprocessed, masks)):
       if image is not None and labels is not None:
-        # Extract channel for per-nucleus processing
+        # Extract the same channel used for segmentation
         if image.ndim == 3:
           channel_image = image[:, :, channel_index]
         else:
           channel_image = image
           
+        # Normalize each nucleus to have mean intensity = 1.0
+        # This makes CV calculations more intuitive (CV = std when mean = 1)
         norm_image, stats = per_nucleus_intensity_normalization(
           channel_image, labels, target_mean=1.0, verbose=(i == 0)
         )
@@ -189,24 +194,26 @@ def main():
   # Extract image names for analysis
   image_names = [str(Path(nd2_obj.filename).name) for nd2_obj in nd2_objects]
 
-  # Prepare timestamped output folder under dna_condensation_analysis_results
+  # Prepare timestamped output directory structure
   root_output = Path("dna_condensation_analysis_results")
   root_output.mkdir(parents=True, exist_ok=True)
-  # Removed pre-run cleanup to preserve previous runs
-  # Create timestamped subfolder
+  
+  # Create unique timestamped subfolder for this analysis run
   ts = datetime.now().strftime("%Y%m%d_%H%M%S")
   run_output = root_output / ts
   run_output.mkdir(parents=True, exist_ok=True)
-  # Copy current config.yaml into the run folder with timestamped name as .txt
+  
+  # Archive current configuration for reproducibility
   try:
     cfg_src = Path(__file__).parent / 'config.yaml'
     if cfg_src.exists():
       cfg_dest = run_output / f"config_{ts}.txt"
       shutil.copy2(cfg_src, cfg_dest)
+      print(f"Configuration archived: {cfg_dest.name}")
   except Exception as _:
     pass
   
-  # Run comprehensive analysis
+  # Execute comprehensive feature extraction and statistical analysis
   try:
     analysis_results = run_analysis_from_batch_processor(
       final_images, masks, image_names, 
@@ -215,42 +222,80 @@ def main():
     print("\n✓ DNA condensation analysis completed successfully!")
     print(f"Results saved to: {run_output}/")
     
-    # Create single metric plot if configured
+    # Generate single-metric significance plots if configured
     plot_config = config.get("plot", {})
     single_metric_config = plot_config.get("single_metric_plot", {})
-    
+
     if single_metric_config.get("enabled", False):
-      metric_to_plot = single_metric_config.get("metric")
-      
-      if metric_to_plot and metric_to_plot.lower() not in ['null', 'none', '']:
-        try:
-          print(f"\n📊 Creating standalone plot for metric: {metric_to_plot}")
-          
-          # Import visualization tools
-          import pandas as pd
-          from dna_condensation.visualization.visualize_statistics import StatisticalVisualizer
-          
-          # Load the features data
-          features_df = pd.read_csv(run_output / "all_features.csv")
-          
-          # Create visualizer and plot
+      try:
+        import pandas as pd
+        from dna_condensation.visualization.visualize_statistics import StatisticalVisualizer
+
+        # Create dedicated subfolder for single metric plots
+        single_plots_dir = run_output / "single_metric_plots"
+        single_plots_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load extracted features for plotting
+        features_df = pd.read_csv(run_output / "all_features.csv")
+
+        # Parse metric configuration (handles string, list, or null values)
+        raw_metric_cfg = single_metric_config.get("metric")
+        
+        # Convert config to list of valid metric names
+        if isinstance(raw_metric_cfg, list):
+          cfg_metrics = [m for m in raw_metric_cfg if isinstance(m, str) and m.strip() and m.lower() not in ["none", "null"]]
+        elif isinstance(raw_metric_cfg, str) and raw_metric_cfg.strip() and raw_metric_cfg.lower() not in ["none", "null"]:
+          cfg_metrics = [raw_metric_cfg.strip()]
+        else:
+          cfg_metrics = []
+
+        metrics_to_plot = []
+        if cfg_metrics:
+          metrics_to_plot = cfg_metrics
+        else:
+          # Auto-discover all analyzable metrics
+          # Prefer features tested in group_comparisons.csv
+          comp_path = run_output / "group_comparisons.csv"
+          if comp_path.exists():
+            try:
+              comp_df = pd.read_csv(comp_path)
+              if "feature" in comp_df.columns:
+                metrics_to_plot = sorted(comp_df["feature"].dropna().unique().tolist())
+            except Exception:
+              metrics_to_plot = []
+          # Fallback to numeric columns in all_features.csv minus non-feature columns
+          if not metrics_to_plot:
+            exclude_cols = {
+              'image_name', 'nucleus_id', 'centroid_x', 'centroid_y',
+              'dk_group', 'dk_number', 'condition', 'well', 'timepoint'
+            }
+            numeric_cols = features_df.select_dtypes(include=['number']).columns.tolist()
+            metrics_to_plot = [c for c in numeric_cols if c not in exclude_cols]
+
+        # Filter out any metrics not present in features_df
+        metrics_to_plot = [m for m in metrics_to_plot if m in features_df.columns]
+        metrics_to_plot = sorted(dict.fromkeys(metrics_to_plot))  # de-duplicate & sort
+
+        if not metrics_to_plot:
+          print("📊 No valid metrics found to plot.")
+        else:
           visualizer = StatisticalVisualizer()
-          save_path = run_output / f"single_metric_{metric_to_plot}.png"
-          
-          fig = visualizer.plot_single_metric_with_significance(
-            df=features_df,
-            metric=metric_to_plot,
-            group_column='condition',
-            save_path=save_path
-          )
-          
-          print(f"✓ Single metric plot saved to: {save_path}")
-          
-        except Exception as e:
-          print(f"✗ Failed to create single metric plot: {e}")
-          print("  Check that the metric name is valid and present in the analysis results")
-      else:
-        print("📊 Single metric plot disabled (metric set to null/none)")
+          print(f"\n📊 Creating standalone plot(s) for {len(metrics_to_plot)} metric(s)...")
+          for metric_to_plot in metrics_to_plot:
+            try:
+              save_path = single_plots_dir / f"single_metric_{metric_to_plot}.png"
+              visualizer.plot_single_metric_with_significance(
+                df=features_df,
+                metric=metric_to_plot,
+                group_column='condition',
+                save_path=save_path
+              )
+              print(f"✓ Saved: {save_path}")
+            except Exception as e:
+              print(f"✗ Failed plotting {metric_to_plot}: {e}")
+      except Exception as e:
+        print(f"✗ Failed to create single metric plot(s): {e}")
+        print("  Check that metric names are valid or leave as null to auto-discover.")
     else:
       print("📊 Single metric plot disabled in config")
 

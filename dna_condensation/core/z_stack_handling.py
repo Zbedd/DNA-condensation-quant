@@ -67,12 +67,15 @@ def collapse_z_axis(nd2_image: Union[ND2Reader, np.ndarray],
 def _nd2_to_array_preserve_channels(nd2_reader: ND2Reader, verbose: bool = False) -> np.ndarray:
     """
     Convert ND2Reader to numpy array while preserving channel information.
+    
+    Handles multi-dimensional ND2 files by properly indexing through z-stacks
+    and channels to create a 4D array (y, x, c, z) for subsequent processing.
     """
     if verbose:
         print(f"ND2 dimensions: {nd2_reader.sizes}")
         print(f"ND2 axes: {nd2_reader.axes}")
     
-    # Get the dimensions
+    # Extract dimensional information from ND2 metadata
     sizes = nd2_reader.sizes
     x_size = sizes.get('x', 1)
     y_size = sizes.get('y', 1) 
@@ -88,15 +91,15 @@ def _nd2_to_array_preserve_channels(nd2_reader: ND2Reader, verbose: bool = False
         # Multi-channel: (y, x, c, z) for easier processing
         full_array = np.zeros((y_size, x_size, c_size, z_size), dtype=np.uint16)
         
-        # Load all data
+        # Load all frames by iterating through z-stacks and channels
         for z in range(z_size):
             for c in range(c_size):
-                # Set the frame - ND2Reader uses dict-style indexing
+                # Set the frame coordinates for ND2Reader
                 nd2_reader.default_coords['z'] = z
                 nd2_reader.default_coords['c'] = c
-                nd2_reader.default_coords['t'] = 0  # Usually t=0
+                nd2_reader.default_coords['t'] = 0  # Usually use first timepoint
                 
-                frame = np.array(nd2_reader[0])  # Get the frame
+                frame = np.array(nd2_reader[0])  # Extract the frame
                 full_array[:, :, c, z] = frame
                 
         if verbose:

@@ -42,13 +42,35 @@ class StatisticalVisualizer:
                                   group_column: str = 'condition',
                                   save_path: Optional[Path] = None) -> plt.Figure:
         """
-        Plot feature distributions by group using violin plots.
+        Plot feature distributions by group using violin plots with overlaid points.
+        
+        Creates violin plots to show distribution shape, with strip plots to show
+        individual data points. This visualization reveals both population-level
+        differences and individual nucleus variation.
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Feature data with group labels
+        features : List[str]
+            List of feature columns to plot
+        group_column : str
+            Column containing group labels
+        save_path : Optional[Path]
+            Path to save figure
+            
+        Returns:
+        --------
+        plt.Figure
+            Generated figure object
         """
         n_features = len(features)
-        n_cols = min(3, n_features)
-        n_rows = (n_features + n_cols - 1) // n_cols
+        n_cols = min(3, n_features)  # Maximum 3 columns for readability
+        n_rows = (n_features + n_cols - 1) // n_cols  # Ceiling division
         
         fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 5, n_rows * 4))
+        
+        # Handle different subplot configurations
         if n_features == 1:
             axes = [axes]
         elif n_rows == 1:
@@ -59,17 +81,18 @@ class StatisticalVisualizer:
             col = i % n_cols
             ax = axes[row, col] if n_rows > 1 else axes[col]
             
-            # Create violin plot
+            # Create violin plot to show distribution shape
             sns.violinplot(data=df, x=group_column, y=feature, ax=ax)
             
-            # Add individual points
+            # Overlay individual data points to show raw data
             sns.stripplot(data=df, x=group_column, y=feature, ax=ax, 
                          size=2, alpha=0.6, color='black')
             
+            # Format plot appearance
             ax.set_title(f'{feature.replace("_", " ").title()}')
             ax.tick_params(axis='x', rotation=45)
             
-        # Remove empty subplots
+        # Clean up empty subplots in the grid
         for i in range(n_features, n_rows * n_cols):
             row = i // n_cols
             col = i % n_cols
@@ -86,16 +109,33 @@ class StatisticalVisualizer:
     def plot_comparison_summary(self, comparison_results: pd.DataFrame,
                                save_path: Optional[Path] = None) -> plt.Figure:
         """
-        Create a summary plot of statistical comparisons.
+        Create a summary volcano plot and bar chart of statistical comparisons.
+        
+        Shows both effect sizes vs significance (volcano plot) and 
+        the number of significant features to give an overview of 
+        analysis results.
+        
+        Parameters:
+        -----------
+        comparison_results : pd.DataFrame
+            Results from statistical comparisons with p-values and effect sizes
+        save_path : Optional[Path]
+            Path to save figure
+            
+        Returns:
+        --------
+        plt.Figure
+            Generated figure with two subplots
         """
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
-        # Plot 1: Effect sizes
+        # Use corrected p-values if available, otherwise raw p-values
         p_col = 'p_corrected' if 'p_corrected' in comparison_results.columns else 'p_value'
         
-        # Color points by significance
+        # Color-code points by statistical significance
         colors = ['red' if p < 0.05 else 'blue' for p in comparison_results[p_col]]
         
+        # Plot 1: Volcano plot (effect size vs -log10(p-value))
         ax1.scatter(comparison_results['effect_size'], -np.log10(comparison_results[p_col]), 
                    c=colors, alpha=0.7)
         
@@ -436,35 +476,53 @@ class StatisticalVisualizer:
             y_jitter = np.random.normal(i, 0.05, len(group_data))
             ax.scatter(y_jitter, group_data, alpha=0.6, s=20, color=colors[i], edgecolor='black', linewidth=0.5)
 
-        # Overall significance test (Kruskal-Wallis for non-parametric)
+        # Prepare data for stats
         group_data_lists = [plot_data[plot_data[group_column] == group][metric].values for group in groups]
-        kw_stat, kw_p = kruskal(*group_data_lists)
+        # Detect degenerate case: all values identical across all data
+        all_unique = plot_data[metric].nunique()
+        all_constant = all_unique <= 1 or all(np.nanstd(g) == 0 for g in group_data_lists if len(g) > 0)
 
-        # Pairwise comparisons with Mann-Whitney U tests
+        # Overall significance test (Kruskal-Wallis for non-parametric), with safeguards
         pairwise_results = []
+        if not all_constant:
+            try:
+                kw_stat, kw_p = kruskal(*group_data_lists)
+            except Exception:
+                kw_stat, kw_p = np.nan, 1.0
+        else:
+            kw_stat, kw_p = np.nan, 1.0
+
+        # Pairwise comparisons with Mann-Whitney U tests (only if overall test significant)
         alpha = 0.05
-        if kw_p < alpha:  # Only do pairwise if overall test is significant
+        if (kw_p is not None) and (not np.isnan(kw_p)) and kw_p < alpha:
             for i, j in combinations(range(n_groups), 2):
                 group1_data = group_data_lists[i]
                 group2_data = group_data_lists[j]
                 if len(group1_data) > 0 and len(group2_data) > 0:
-                    u_stat, p_val = mannwhitneyu(group1_data, group2_data, alternative='two-sided')
-                    # Bonferroni correction
-                    n_comparisons = len(list(combinations(range(n_groups), 2)))
-                    p_corrected = min(p_val * n_comparisons, 1.0)
-                    pairwise_results.append({
-                        'group1': groups[i],
-                        'group2': groups[j],
-                        'p_value': p_val,
-                        'p_corrected': p_corrected,
-                        'significant': p_corrected < alpha,
-                        'positions': (i, j)
-                    })
+                    # Skip degenerate pairs
+                    if (np.nanstd(group1_data) == 0 and np.nanstd(group2_data) == 0 and
+                        np.allclose(np.nanmean(group1_data), np.nanmean(group2_data))):
+                        continue
+                    try:
+                        u_stat, p_val = mannwhitneyu(group1_data, group2_data, alternative='two-sided')
+                        # Bonferroni correction
+                        n_comparisons = len(list(combinations(range(n_groups), 2)))
+                        p_corrected = min(p_val * n_comparisons, 1.0)
+                        pairwise_results.append({
+                            'group1': groups[i],
+                            'group2': groups[j],
+                            'p_value': p_val,
+                            'p_corrected': p_corrected,
+                            'significant': p_corrected < alpha,
+                            'positions': (i, j)
+                        })
+                    except Exception:
+                        continue
 
         # Add significance bars
         y_max = plot_data[metric].max()
         y_min = plot_data[metric].min()
-        y_range = y_max - y_min
+        y_range = max(y_max - y_min, 1e-6)
         bar_height = y_max + 0.05 * y_range
         sig_height_increment = 0.08 * y_range
         current_height = bar_height
@@ -486,7 +544,7 @@ class StatisticalVisualizer:
                         ha='center', va='bottom', fontweight='bold', fontsize=12)
                 current_height += sig_height_increment
 
-        # Customize plot
+        # Customize plot and annotations
         ax.set_xticks(range(len(groups)))
         ax.set_xticklabels(groups, rotation=45, ha='right')
         ax.set_xlabel('Experimental Groups', fontsize=12, fontweight='bold')
@@ -502,8 +560,10 @@ class StatisticalVisualizer:
             ax.set_title(f'{clean_metric} Across Experimental Groups', fontsize=14, fontweight='bold', pad=20)
 
         # Add statistical test info
-        if kw_p < 0.001:
-            kw_text = f'Kruskal-Wallis: p < 0.001'
+        if (kw_p is None) or np.isnan(kw_p):
+            kw_text = 'Kruskal-Wallis: n/a'
+        elif kw_p < 0.001:
+            kw_text = 'Kruskal-Wallis: p < 0.001'
         else:
             kw_text = f'Kruskal-Wallis: p = {kw_p:.3f}'
         ax.text(0.02, 0.98, kw_text, transform=ax.transAxes, fontsize=10, 
@@ -526,4 +586,5 @@ class StatisticalVisualizer:
         if save_path:
             plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
             print(f"Saved single metric plot to {save_path}")
+            plt.close(fig)  # Prevent too many open figures in batch mode
         return fig

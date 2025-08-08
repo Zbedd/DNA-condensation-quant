@@ -120,23 +120,23 @@ def deconvolution(image: np.ndarray, channel_index: int, sigma: float = 1.0, ite
         estimate = processed_image.copy()
         
         for i in range(iterations):
-            # Forward convolution
+            # Forward convolution: simulate how the true image would look with PSF blur
             convolved = convolve2d(estimate, psf, mode='same', boundary='symm')
             
-            # Avoid division by zero
+            # Avoid division by zero in ratio calculation
             convolved = np.maximum(convolved, 1e-10)
             
-            # Calculate ratio
+            # Calculate correction ratio (observed / simulated intensities)
             ratio = processed_image / convolved
             
-            # Backward convolution with flipped PSF
+            # Backward convolution with flipped PSF to propagate corrections
             psf_flipped = np.flip(psf)
             correction = convolve2d(ratio, psf_flipped, mode='same', boundary='symm')
             
-            # Update estimate
+            # Apply multiplicative correction to refine estimate
             estimate = estimate * correction
             
-            # Ensure positivity
+            # Ensure non-negative values (physical constraint)
             estimate = np.maximum(estimate, 0)
         
         # Convert back to uint8

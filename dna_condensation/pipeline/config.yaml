@@ -54,7 +54,8 @@ plot:
   plot_segmentation: false       # Enable/disable segmentation result visualization
   single_metric_plot:
     enabled: true                # Enable/disable single metric standalone plot
-    metric: "glcm_homogeneity_mean"  # Metric to plot (set to null/none to disable)
+    metric: null  # Metric to plot (may be none, string, or list of strings)
+    # (set to null/none to disable)
     # Available metrics include:
     # Intensity: mean_intensity, std_intensity, intensity_entropy, high_intensity_fraction, etc.
     # Morphology: area, perimeter, circularity, solidity, etc.

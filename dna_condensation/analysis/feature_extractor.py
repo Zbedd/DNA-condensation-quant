@@ -163,189 +163,369 @@ class DNACondensationFeatureExtractor:
         return features
     
     def _intensity_features(self, intensity_values: np.ndarray) -> Dict:
-        """Extract intensity distribution features."""
+        """
+        Extract comprehensive intensity distribution features.
         
-        # Basic statistics
+        These features quantify the distribution of pixel intensities within a nucleus
+        to characterize DNA condensation. Higher CV and skewness typically indicate
+        more heterogeneous chromatin organization.
+        
+        Args:
+            intensity_values: 1D array of pixel intensities within the nucleus
+            
+        Returns:
+            Dictionary with statistical measures of intensity distribution
+        """
+        
+        # Core statistical measures
         mean_intensity = np.mean(intensity_values)
         std_intensity = np.std(intensity_values)
         
         features = {
             'mean_intensity': mean_intensity,
             'std_intensity': std_intensity,
+            # Coefficient of variation - key metric for homogeneity analysis
             'coefficient_of_variation': std_intensity / mean_intensity if mean_intensity > 0 else 0,
             'min_intensity': np.min(intensity_values),
             'max_intensity': np.max(intensity_values),
             'intensity_range': np.max(intensity_values) - np.min(intensity_values),
         }
         
-        # Percentile-based features
+        # Percentile-based features for robust distribution characterization
         percentiles = [10, 25, 50, 75, 90, 95, 99]
         for p in percentiles:
             features[f'intensity_p{p}'] = np.percentile(intensity_values, p)
         
-        # High intensity fraction
+        # High intensity fraction - indicates proportion of bright chromatin
         high_threshold = np.percentile(intensity_values, self.high_intensity_percentile)
         features['high_intensity_fraction'] = np.mean(intensity_values >= high_threshold)
         
-        # Distribution shape
+        # Distribution shape characteristics
         from scipy.stats import skew, kurtosis
-        features['intensity_skewness'] = skew(intensity_values)
-        features['intensity_kurtosis'] = kurtosis(intensity_values)
+        features['intensity_skewness'] = skew(intensity_values)  # Asymmetry of distribution
+        features['intensity_kurtosis'] = kurtosis(intensity_values)  # Tail heaviness
         
-        # Entropy (measure of intensity variability)
+        # Entropy quantifies intensity variability (higher = more disordered)
         hist, _ = np.histogram(intensity_values, bins=256)
-        hist = hist / np.sum(hist)  # normalize
-        features['intensity_entropy'] = entropy(hist + 1e-10)  # avoid log(0)
+        hist = hist / np.sum(hist)  # Normalize to probabilities
+        features['intensity_entropy'] = entropy(hist + 1e-10)  # Small constant prevents log(0)
         
         return features
     
     def _morphological_features(self, region) -> Dict:
-        """Extract morphological features."""
+        """
+        Extract morphological shape and size features from nucleus regions.
+        
+        These features characterize nucleus geometry and can indicate changes
+        in nuclear envelope structure associated with condensation states.
+        
+        Returns:
+            Dictionary with shape descriptors including area, perimeter, 
+            eccentricity, and derived metrics like circularity and aspect ratio.
+        """
         
         return {
-            'area': region.area,
-            'perimeter': region.perimeter,
-            'major_axis_length': region.major_axis_length,
-            'minor_axis_length': region.minor_axis_length,
-            'eccentricity': region.eccentricity,
-            'solidity': region.solidity,
-            'extent': region.extent,
-            'orientation': region.orientation,
-            'equivalent_diameter': region.equivalent_diameter,
+            # Basic size measurements
+            'area': region.area,  # Number of pixels in nucleus
+            'perimeter': region.perimeter,  # Boundary length
+            
+            # Shape characterization via fitted ellipse
+            'major_axis_length': region.major_axis_length,  # Length of major axis
+            'minor_axis_length': region.minor_axis_length,  # Length of minor axis
+            'eccentricity': region.eccentricity,  # How elliptical (0=circle, 1=line)
+            'orientation': region.orientation,  # Angle of major axis
+            
+            # Shape quality metrics
+            'solidity': region.solidity,  # Area/convex_hull_area (measures concavity)
+            'extent': region.extent,  # Area/bounding_box_area (measures rectangularity)
+            'equivalent_diameter': region.equivalent_diameter,  # Diameter of equivalent circle
+            
+            # Derived shape metrics
             'aspect_ratio': region.major_axis_length / region.minor_axis_length if region.minor_axis_length > 0 else 0,
-            'circularity': 4 * np.pi * region.area / (region.perimeter ** 2) if region.perimeter > 0 else 0,
+            'circularity': 4 * np.pi * region.area / (region.perimeter ** 2) if region.perimeter > 0 else 0,  # 1=perfect circle
         }
     
     def _radial_features(self, region, image: np.ndarray) -> Dict:
-        """Extract radial intensity profile features."""
+        """
+        Extract radial intensity profile features to quantify spatial organization.
         
-        # Get coordinates relative to centroid
-        coords = region.coords
-        centroid = region.centroid
+        Creates concentric shells from nucleus center to edge and measures
+        average intensity in each shell. Useful for detecting center-to-edge
+        intensity gradients that indicate chromatin condensation patterns.
         
-        # Calculate distances from centroid
+        Returns:
+            Dictionary with mean intensity for each radial shell plus 
+            center-to-edge ratio metric.
+        """
+        
+        # Get pixel coordinates relative to nucleus centroid
+        coords = region.coords  # (N, 2) array of (y, x) coordinates
+        centroid = region.centroid  # (y, x) center position
+        
+        # Calculate Euclidean distance from each pixel to centroid
         distances = np.sqrt(np.sum((coords - centroid) ** 2, axis=1))
         max_distance = np.max(distances)
         
+        # Handle edge case of single-pixel nucleus
         if max_distance == 0:
-            # Single pixel nucleus
             return {f'radial_shell_{i}': region.mean_intensity for i in range(self.radial_shells)}
         
-        # Create shells
+        # Create concentric shells from center to edge
         shell_means = {}
         for i in range(self.radial_shells):
+            # Define shell boundaries as fractions of max distance
             r_inner = i * max_distance / self.radial_shells
             r_outer = (i + 1) * max_distance / self.radial_shells
             
-            # Find pixels in this shell
+            # Find pixels in this shell (annular region)
             mask = (distances >= r_inner) & (distances < r_outer)
-            if i == self.radial_shells - 1:  # Include boundary in last shell
+            
+            # Include boundary pixels in outermost shell
+            if i == self.radial_shells - 1:
                 mask = distances >= r_inner
                 
             if np.any(mask):
+                # Get coordinates and intensities for pixels in this shell
                 shell_coords = coords[mask]
                 shell_intensities = [image[y, x] for y, x in shell_coords]
                 shell_means[f'radial_shell_{i}'] = np.mean(shell_intensities)
             else:
+                # Empty shell (shouldn't happen with proper shell sizing)
                 shell_means[f'radial_shell_{i}'] = 0
         
-        # Additional radial metrics
+        # Calculate center-to-edge intensity ratio (condensation indicator)
         if self.radial_shells >= 2:
+            center_intensity = shell_means['radial_shell_0']
+            edge_intensity = shell_means[f'radial_shell_{self.radial_shells-1}']
+            
             shell_means['center_to_edge_ratio'] = (
-                shell_means['radial_shell_0'] / shell_means[f'radial_shell_{self.radial_shells-1}']
-                if shell_means[f'radial_shell_{self.radial_shells-1}'] > 0 else 0
+                center_intensity / edge_intensity if edge_intensity > 0 else 0
             )
         
         return shell_means
     
     def _texture_features(self, region) -> Dict:
-        """Extract texture features using GLCM."""
+        """
+        Extract texture features using Gray-Level Co-occurrence Matrix (GLCM).
         
-        # Get the nucleus image patch
+        This implementation computes GLCM only within the nucleus mask to avoid
+        background artifacts that would make homogeneity measurements constant.
+        Texture features quantify spatial patterns in intensity that indicate
+        chromatin organization and DNA condensation.
+        
+        Returns:
+            Dictionary with GLCM properties (contrast, dissimilarity, homogeneity, 
+            energy, correlation) computed across multiple angles, with mean and std.
+        """
+        
+        # Get the nucleus image patch and its boolean mask
         nucleus_image = region.intensity_image
-        nucleus_mask = region.image
-        
-        # Apply mask to get only nucleus pixels
-        masked_image = nucleus_image.copy()
-        masked_image[~nucleus_mask] = 0
-        
-        # Normalize to 0-255 for GLCM
-        if np.max(masked_image) > np.min(masked_image):
-            normalized = ((masked_image - np.min(masked_image)) / 
-                         (np.max(masked_image) - np.min(masked_image)) * 255).astype(np.uint8)
-        else:
-            normalized = masked_image.astype(np.uint8)
-        
-        try:
-            # Compute GLCM
-            from skimage.feature import graycomatrix, graycoprops
-            
-            glcm = graycomatrix(
-                normalized, 
-                distances=[self.texture_distance], 
-                angles=[0, np.pi/4, np.pi/2, 3*np.pi/4],
-                levels=256,
-                symmetric=True,
-                normed=True
-            )
-            
-            # Extract GLCM properties
-            properties = ['contrast', 'dissimilarity', 'homogeneity', 'energy', 'correlation']
-            texture_features = {}
-            
-            for prop in properties:
-                values = graycoprops(glcm, prop)
-                texture_features[f'glcm_{prop}_mean'] = np.mean(values)
-                texture_features[f'glcm_{prop}_std'] = np.std(values)
-            
-            return texture_features
-            
-        except Exception as e:
-            warnings.warn(f"GLCM computation failed: {e}")
-            # Return zeros for all texture features
+        # Ensure 2D image (handle unexpected channel dimensions)
+        if getattr(nucleus_image, 'ndim', 2) == 3:
+            nucleus_image = np.mean(nucleus_image, axis=-1)
+        nucleus_mask = region.image.astype(bool)
+
+        # Skip texture analysis for tiny regions
+        if nucleus_mask.sum() < 2:
             properties = ['contrast', 'dissimilarity', 'homogeneity', 'energy', 'correlation']
             return {f'glcm_{prop}_{stat}': 0 for prop in properties for stat in ['mean', 'std']}
-    
+
+        # Normalize intensities using only mask pixels to avoid background bias
+        levels = 256
+        masked_vals = nucleus_image[nucleus_mask]
+        min_val = float(masked_vals.min())
+        max_val = float(masked_vals.max())
+        if max_val > min_val:
+            normalized = ((nucleus_image - min_val) / (max_val - min_val) * (levels - 1)).astype(np.uint8)
+        else:
+            # Handle constant intensity regions
+            normalized = np.zeros_like(nucleus_image, dtype=np.uint8)
+
+        # Define angles for directional texture analysis
+        angles = [0, np.pi/4, np.pi/2, 3*np.pi/4]  # 0°, 45°, 90°, 135°
+        d = int(self.texture_distance)
+
+        def _offset(angle: float, distance: int) -> Tuple[int, int]:
+            """Convert angle to pixel offset (dy, dx) for neighbor sampling."""
+            if angle == 0:
+                return 0, distance  # Horizontal →
+            elif angle == np.pi/4:
+                return -distance, distance  # Diagonal ↗
+            elif angle == np.pi/2:
+                return -distance, 0  # Vertical ↑
+            elif angle == 3*np.pi/4:
+                return -distance, -distance  # Diagonal ↖
+            # Generic fallback for arbitrary angles
+            return int(round(-distance * np.sin(angle))), int(round(distance * np.cos(angle)))
+
+        glcms = []
+        H, W = normalized.shape
+        
+        # Build GLCM for each angle by counting co-occurrences within mask only
+        for ang in angles:
+            dy, dx = _offset(ang, d)
+            
+            # Find valid pixel pairs where both pixels are within image bounds
+            y0_start = max(0, -dy)
+            y0_end = min(H, H - dy)  # exclusive end
+            x0_start = max(0, -dx)
+            x0_end = min(W, W - dx)  # exclusive end
+            
+            # Skip if no valid region exists for this angle/distance
+            if (y0_end - y0_start) <= 0 or (x0_end - x0_start) <= 0:
+                continue
+
+            # Calculate corresponding coordinates for neighbor pixels
+            y1_start = y0_start + dy
+            y1_end = y0_end + dy
+            x1_start = x0_start + dx
+            x1_end = x0_end + dx
+
+            # Extract intensity values and masks for pixel pairs
+            I0 = normalized[y0_start:y0_end, x0_start:x0_end]  # Reference pixels
+            I1 = normalized[y1_start:y1_end, x1_start:x1_end]  # Neighbor pixels
+            M0 = nucleus_mask[y0_start:y0_end, x0_start:x0_end]  # Reference mask
+            M1 = nucleus_mask[y1_start:y1_end, x1_start:x1_end]  # Neighbor mask
+            
+            # Only count pairs where both pixels are inside the nucleus
+            valid = M0 & M1
+            if not np.any(valid):
+                continue
+
+            # Get intensity pairs for co-occurrence counting
+            p_i = I0[valid].ravel()  # Reference intensities
+            p_j = I1[valid].ravel()  # Neighbor intensities
+
+            # Build co-occurrence matrix by counting intensity pairs
+            glcm = np.zeros((levels, levels), dtype=np.float64)
+            np.add.at(glcm, (p_i, p_j), 1)  # Increment count for each (i,j) pair
+            
+            # Make symmetric (count both (i,j) and (j,i) directions)
+            glcm = glcm + glcm.T
+            
+            # Normalize to probabilities
+            total = glcm.sum()
+            if total > 0:
+                glcm = glcm / total
+            else:
+                continue  # Skip empty matrices
+
+            glcms.append(glcm)
+
+        # Return zeros if no valid GLCMs were computed
+        if len(glcms) == 0:
+            properties = ['contrast', 'dissimilarity', 'homogeneity', 'energy', 'correlation']
+            return {f'glcm_{prop}_{stat}': 0 for prop in properties for stat in ['mean', 'std']}
+
+        # Compute texture properties from each GLCM
+        contrasts = []
+        dissimilarities = []
+        homogeneities = []
+        energies = []
+        correlations = []
+
+        # Pre-compute coordinate grids for efficient property calculation
+        i_idx = np.arange(levels, dtype=np.float64)
+        j_idx = np.arange(levels, dtype=np.float64)
+        I, J = np.meshgrid(i_idx, j_idx, indexing='ij')
+        diff = I - J  # Intensity differences
+        absdiff = np.abs(diff)  # Absolute differences
+        denom_h = 1.0 + diff * diff  # Homogeneity denominator
+
+        for P in glcms:
+            # Calculate marginal distributions
+            px = P.sum(axis=1)  # Row sums
+            py = P.sum(axis=0)  # Column sums
+            mu_x = (i_idx * px).sum()  # Mean of row indices
+            mu_y = (j_idx * py).sum()  # Mean of column indices
+            sig_x = np.sqrt(((i_idx - mu_x) ** 2 * px).sum())  # Std of row indices
+            sig_y = np.sqrt(((j_idx - mu_y) ** 2 * py).sum())  # Std of column indices
+
+            # Compute GLCM texture properties
+            contrasts.append(float((P * (diff ** 2)).sum()))  # Local intensity variation
+            dissimilarities.append(float((P * absdiff).sum()))  # Linear local variation
+            homogeneities.append(float((P / denom_h).sum()))  # Inverse of contrast
+            energies.append(float((P * P).sum()))  # Uniformity of distribution
+            
+            # Correlation (linear dependency between pixels)
+            if sig_x > 0 and sig_y > 0:
+                correlations.append(float(((I - mu_x) * (J - mu_y) * P).sum() / (sig_x * sig_y)))
+            else:
+                correlations.append(0.0)  # No variation means no correlation
+
+        texture_features = {
+            'glcm_contrast_mean': float(np.mean(contrasts)),
+            'glcm_contrast_std': float(np.std(contrasts)),
+            'glcm_dissimilarity_mean': float(np.mean(dissimilarities)),
+            'glcm_dissimilarity_std': float(np.std(dissimilarities)),
+            'glcm_homogeneity_mean': float(np.mean(homogeneities)),
+            'glcm_homogeneity_std': float(np.std(homogeneities)),
+            'glcm_energy_mean': float(np.mean(energies)),
+            'glcm_energy_std': float(np.std(energies)),
+            'glcm_correlation_mean': float(np.mean(correlations)),
+            'glcm_correlation_std': float(np.std(correlations)),
+        }
+
+        return texture_features
     def _granulometry_features(self, region) -> Dict:
-        """Extract granulometry features (multi-scale morphological analysis)."""
+        """
+        Extract granulometry features using multi-scale morphological analysis.
+        
+        Granulometry applies morphological opening with increasing disk sizes
+        to characterize the size distribution of bright structures within nuclei.
+        This helps quantify chromatin granularity and condensation patterns.
+        
+        Returns:
+            Dictionary with spot counts, areas, and area fractions for each
+            disk radius used in the opening operations.
+        """
         
         nucleus_image = region.intensity_image
-        nucleus_mask = region.image
+        # Ensure we have a 2D image
+        if getattr(nucleus_image, 'ndim', 2) == 3:
+            nucleus_image = np.mean(nucleus_image, axis=-1)
+        nucleus_mask = region.image.astype(bool)
         
-        # Apply mask
+        # Apply nucleus mask to focus analysis within the nucleus
         masked_image = nucleus_image.copy()
         masked_image[~nucleus_mask] = 0
         
         granulometry = {}
         
         try:
+            # Apply morphological opening with progressively larger disks
             for radius in self.granulometry_radii:
-                # Morphological opening with increasing radius
+                # Create circular structuring element
                 structuring_element = disk(radius)
+                
+                # Opening removes structures smaller than the disk
+                # Remaining bright regions indicate structures >= disk size
                 opened = opening(masked_image, structuring_element)
                 
-                # Measure remaining "spots"
+                # Identify and count remaining bright structures
                 opened_binary = opened > 0
                 spots = measure.label(opened_binary)
-                n_spots = np.max(spots)
-                total_area = np.sum(opened_binary)
+                n_spots = int(np.max(spots)) if spots.size > 0 else 0
+                total_area = int(np.sum(opened_binary))
                 
+                # Store absolute measurements
                 granulometry[f'granulometry_spots_r{radius}'] = n_spots
                 granulometry[f'granulometry_area_r{radius}'] = total_area
                 
-                # Relative measurements
-                if nucleus_mask.sum() > 0:
-                    granulometry[f'granulometry_area_fraction_r{radius}'] = total_area / nucleus_mask.sum()
+                # Calculate relative area (normalized by nucleus size)
+                area_mask = int(nucleus_mask.sum())
+                if area_mask > 0:
+                    granulometry[f'granulometry_area_fraction_r{radius}'] = total_area / area_mask
                 else:
-                    granulometry[f'granulometry_area_fraction_r{radius}'] = 0
+                    granulometry[f'granulometry_area_fraction_r{radius}'] = 0.0
                     
         except Exception as e:
             warnings.warn(f"Granulometry computation failed: {e}")
-            # Return zeros
+            # Return zeros on failure
             for radius in self.granulometry_radii:
                 granulometry[f'granulometry_spots_r{radius}'] = 0
                 granulometry[f'granulometry_area_r{radius}'] = 0
-                granulometry[f'granulometry_area_fraction_r{radius}'] = 0
+                granulometry[f'granulometry_area_fraction_r{radius}'] = 0.0
         
         return granulometry
 

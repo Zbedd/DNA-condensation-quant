@@ -210,3 +210,6 @@ __marimo__/
 dna_condensation_analysis_results/
 output/
 temp/
+
+# Development and debug scripts
+dev_scripts/

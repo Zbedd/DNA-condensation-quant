@@ -193,15 +193,26 @@ class DNACondensationAnalysisPipeline:
         }
     
     def _get_analysis_features(self) -> List[str]:
-        """Get list of feature columns for statistical analysis."""
+        """
+        Identify numeric feature columns suitable for statistical analysis.
         
-        # Exclude non-feature columns
+        Excludes metadata columns like identifiers, coordinates, and experimental
+        grouping variables to focus on biological/morphological measurements.
+        
+        Returns:
+        --------
+        List[str]
+            List of feature column names for analysis
+        """
+        # Define columns to exclude from statistical analysis
         exclude_cols = {
+            # Identifiers and coordinates (not biological features)
             'image_name', 'nucleus_id', 'centroid_x', 'centroid_y',
+            # Experimental metadata (grouping variables, not features)
             'dk_group', 'dk_number', 'condition', 'well', 'timepoint'
         }
         
-        # Get numeric columns that are not in exclude list
+        # Select numeric columns that represent biological measurements
         numeric_cols = self.features_df.select_dtypes(include=[np.number]).columns
         feature_cols = [col for col in numeric_cols if col not in exclude_cols]
         
@@ -287,9 +298,15 @@ class DNACondensationAnalysisPipeline:
         interpretation.append("=" * 40)
         interpretation.append("")
         
-        # Get significant results
-        p_col = 'p_corrected' if 'p_corrected' in self.comparison_results.columns else 'p_value'
-        significant = self.comparison_results[self.comparison_results[p_col] < 0.05]
+        # Get significant results (align with summary logic)
+        comp = self.comparison_results
+        if 'significant' in comp.columns:
+            significant = comp[comp['significant'] == True]
+            criterion = "BH-corrected (FDR)"
+        else:
+            p_col = 'p_corrected' if 'p_corrected' in comp.columns else 'p_value'
+            significant = comp[comp[p_col] < 0.05]
+            criterion = f"{p_col} < 0.05"
         
         if len(significant) == 0:
             interpretation.append("No statistically significant differences found between groups.")
@@ -299,14 +316,14 @@ class DNACondensationAnalysisPipeline:
             interpretation.append("- Requirement for different analytical approaches")
             return "\n".join(interpretation)
         
+        interpretation.append(f"Found {len(significant)} significant differences ({criterion}).")
+        interpretation.append("")
+        
         # Analyze feature categories
         intensity_features = significant[significant['feature'].str.contains('intensity|cv|entropy')]
         morphology_features = significant[significant['feature'].str.contains('area|perimeter|eccentricity|solidity')]
         spatial_features = significant[significant['feature'].str.contains('radial|center')]
         texture_features = significant[significant['feature'].str.contains('glcm|granulometry')]
-        
-        interpretation.append(f"Found {len(significant)} significant differences:")
-        interpretation.append("")
         
         if len(intensity_features) > 0:
             interpretation.append(f"INTENSITY FEATURES ({len(intensity_features)} significant):")
