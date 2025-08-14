@@ -157,7 +157,15 @@ class StatisticalVisualizer:
                         fontsize=8, alpha=0.8)
         
         # Plot 2: Feature ranking by effect size
-        top_features = comparison_results.nlargest(15, 'effect_size')
+        # Handle cases where effect_size may be missing
+        if 'effect_size' in comparison_results.columns:
+            top_features = comparison_results.nlargest(15, 'effect_size')
+        else:
+            # Fallback: use inverse p-value as a proxy for ranking
+            p_col = 'p_corrected' if 'p_corrected' in comparison_results.columns else 'p_value'
+            tmp = comparison_results.copy()
+            tmp['_inv_p'] = -np.log10(tmp[p_col].replace(0, np.nextafter(0, 1)))
+            top_features = tmp.nlargest(15, '_inv_p')
         
         bars = ax2.barh(range(len(top_features)), top_features['effect_size'])
         ax2.set_yticks(range(len(top_features)))
@@ -369,7 +377,12 @@ class StatisticalVisualizer:
         
         # 1. Feature distributions
         print("Creating feature distribution plots...")
-        key_features = comparison_results.nlargest(12, 'effect_size')['feature'].tolist()
+        # Handle cases where effect_size may be missing (single group scenarios)
+        if 'effect_size' in comparison_results.columns and len(comparison_results) > 0:
+            key_features = comparison_results.nlargest(12, 'effect_size')['feature'].tolist()
+        else:
+            # Fallback to p-value ranking when effect_size unavailable
+            key_features = comparison_results.nsmallest(12, 'p_value')['feature'].tolist() if 'p_value' in comparison_results.columns else features[:12]
         fig1 = self.plot_feature_distributions(df, key_features, group_column,
                                               output_dir / 'feature_distributions.png')
         figures['distributions'] = fig1
@@ -408,19 +421,91 @@ class StatisticalVisualizer:
         
         return figures
 
+    def _aggregate_by_replicate(self, df: pd.DataFrame,
+                                metric: str,
+                                group_column: str = 'condition',
+                                replicate_column: str = 'image_name',
+                                agg: str = 'median',
+                                min_nuclei: int = 1) -> pd.DataFrame:
+        """
+        Aggregate per-nucleus measurements to replicate-level (e.g., image-level) summaries
+        to avoid pseudoreplication in statistical testing.
+
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Data with per-nucleus measurements
+        metric : str
+            Column name of the metric to aggregate
+        group_column : str
+            Column name containing group labels
+        replicate_column : str
+            Column name identifying biological/technical replicates (e.g., 'image_name')
+        agg : str
+            Aggregation method ('median' or 'mean')
+        min_nuclei : int
+            Minimum number of nuclei required per replicate to include in analysis
+
+        Returns:
+        --------
+        pd.DataFrame
+            Aggregated data with columns: replicate_column, group_column, 'value', 'n_nuclei'
+        """
+        if replicate_column not in df.columns:
+            # No replicate id available; return empty to signal fallback
+            return pd.DataFrame(columns=[replicate_column, group_column, 'value', 'n_nuclei'])
+
+        # Keep rows with valid metric values
+        sub = df[[replicate_column, group_column, metric]].dropna().copy()
+        
+        if len(sub) == 0:
+            return pd.DataFrame(columns=[replicate_column, group_column, 'value', 'n_nuclei'])
+
+        # Compute replicate-level summaries and nucleus counts
+        counts = sub.groupby([replicate_column, group_column]).size().reset_index(name='n_nuclei')
+
+        if agg == 'median':
+            vals = sub.groupby([replicate_column, group_column])[metric].median().reset_index()
+        elif agg == 'mean':
+            vals = sub.groupby([replicate_column, group_column])[metric].mean().reset_index()
+        else:
+            raise ValueError(f"Unknown aggregation method: {agg}. Use 'median' or 'mean'.")
+
+        # Merge counts with aggregated values
+        result = pd.merge(vals, counts, on=[replicate_column, group_column], how='inner')
+        result = result.rename(columns={metric: 'value'})
+        
+        # Quality filter: require minimum number of nuclei per replicate
+        result = result[result['n_nuclei'] >= min_nuclei].reset_index(drop=True)
+        
+        return result
+
     def plot_single_metric_with_significance(self, df: pd.DataFrame,
                                            metric: str,
                                            group_column: str = 'condition',
                                            save_path: Optional[Path] = None,
                                            title: Optional[str] = None,
-                                           ylabel: Optional[str] = None) -> plt.Figure:
+                                           ylabel: Optional[str] = None,
+                                           use_image_aggregation: bool = True) -> plt.Figure:
         """
         Create a standalone figure for a specific metric across groups with significance testing.
+        
+        This function addresses pseudoreplication by aggregating per-nucleus measurements to
+        image-level summaries for statistical testing, while still displaying the full 
+        per-nucleus distribution for visualization. When sufficient replicates are available,
+        statistical tests are performed on image-level medians rather than individual nuclei.
+        
+        Statistical Approach:
+        - Uses Kruskal-Wallis test for overall group differences
+        - Performs pairwise Mann-Whitney U tests with Holm correction for multiple comparisons
+        - Aggregates to image level when ≥2 images per group are available
+        - Falls back to per-nucleus testing with warning when insufficient replicates
         
         Parameters:
         -----------
         df : pd.DataFrame
             Data containing the metric and group information
+            Must include columns: metric, group_column, 'image_name'
         metric : str
             Name of the metric/feature to plot
         group_column : str
@@ -431,11 +516,22 @@ class StatisticalVisualizer:
             Custom title for the plot
         ylabel : Optional[str]
             Custom y-axis label
+        use_image_aggregation : bool
+            If True, aggregate to image level for statistical testing to avoid pseudoreplication.
+            If False, use per-nucleus data directly (original behavior with pseudoreplication risk).
+            Default: True (recommended for robust statistics)
             
         Returns:
         --------
         plt.Figure
-            The created figure
+            The created figure with violin plots, significance bars, and method annotations
+            
+        Notes:
+        ------
+        - Black diamonds represent image-level medians (when using image-level testing)
+        - Smaller colored points represent individual nuclei
+        - Statistical significance is based on image-level aggregated values when possible
+        - Text annotations indicate the testing method used and sample sizes
         """
         from scipy.stats import kruskal, mannwhitneyu
         from itertools import combinations
@@ -446,12 +542,42 @@ class StatisticalVisualizer:
             available_metrics = [col for col in df.columns if col not in ['image_name', 'nucleus_id', 'centroid_x', 'centroid_y', group_column]]
             raise ValueError(f"Metric '{metric}' not found. Available metrics: {available_metrics[:10]}...")
 
-        # Remove missing values
-        plot_data = df[[metric, group_column]].dropna()
+        # Remove missing values for plotting
+        plot_data = df[[metric, group_column, 'image_name']].dropna()
+        
+        # Aggregate to image level to avoid pseudoreplication in statistical testing
+        replicate_col = 'image_name'
+        df_image = None
+        if use_image_aggregation:
+            df_image = self._aggregate_by_replicate(df, metric, group_column=group_column,
+                                                  replicate_column=replicate_col, 
+                                                  agg='median', min_nuclei=1)
+        
         if len(plot_data) == 0:
             raise ValueError(f"No valid data for metric '{metric}'")
 
-        groups = sorted(plot_data[group_column].unique())
+        # Determine whether to use image-level testing or per-nucleus testing
+        use_image_level = False
+        if use_image_aggregation and df_image is not None and not df_image.empty:
+            groups_image = sorted(df_image[group_column].unique())
+            n_images_per_group = df_image.groupby(group_column)['image_name'].nunique()
+            # Use image-level testing if we have ≥2 groups and ≥2 images per group
+            if len(groups_image) >= 2 and (n_images_per_group >= 2).all():
+                use_image_level = True
+                groups = groups_image
+                print(f"Using image-level testing (n_images per group: {dict(n_images_per_group)})")
+            else:
+                print(f"Insufficient images per group for image-level testing. Images per group: {dict(n_images_per_group)}")
+                print("Falling back to per-nucleus testing")
+
+        if not use_image_level:
+            # Use per-nucleus testing
+            groups = sorted(plot_data[group_column].unique())
+            if use_image_aggregation:
+                print(f"Warning: Using per-nucleus testing (potential pseudoreplication)")
+            else:
+                print(f"Using per-nucleus testing (as requested via use_image_aggregation=False)")
+
         n_groups = len(groups)
         if n_groups < 2:
             raise ValueError(f"Need at least 2 groups for comparison, found {n_groups}")
@@ -470,21 +596,38 @@ class StatisticalVisualizer:
             pc.set_facecolor(colors[i])
             pc.set_alpha(0.7)
 
-        # Add individual data points (jittered)
+        # Add individual nucleus data points (jittered) - for visualization
         for i, group in enumerate(groups):
             group_data = plot_data[plot_data[group_column] == group][metric].values
-            y_jitter = np.random.normal(i, 0.05, len(group_data))
-            ax.scatter(y_jitter, group_data, alpha=0.6, s=20, color=colors[i], edgecolor='black', linewidth=0.5)
+            x_jitter = np.random.normal(i, 0.05, len(group_data))
+            ax.scatter(x_jitter, group_data, alpha=0.4, s=15, color=colors[i], edgecolor='white', linewidth=0.3, label='nuclei' if i == 0 else "")
 
-        # Prepare data for stats
-        group_data_lists = [plot_data[plot_data[group_column] == group][metric].values for group in groups]
+        # Overlay image-level data points if using image-level testing
+        if use_image_level:
+            for i, group in enumerate(groups):
+                image_data = df_image[df_image[group_column] == group]['value'].values
+                x_jitter_images = np.random.normal(i, 0.15, len(image_data))
+                ax.scatter(x_jitter_images, image_data, alpha=0.8, s=60, color='black', 
+                          edgecolor=colors[i], linewidth=2, marker='D', 
+                          label='image medians' if i == 0 else "")
+
+        # Prepare data for statistical testing
+        if use_image_level:
+            # Use image-level aggregated values for testing
+            group_data_lists = [df_image[df_image[group_column] == group]['value'].values for group in groups]
+            test_data_description = "image-level medians"
+        else:
+            # Fall back to per-nucleus data
+            group_data_lists = [plot_data[plot_data[group_column] == group][metric].values for group in groups]
+            test_data_description = "per-nucleus values"
+
         # Detect degenerate case: all values identical across all data
-        all_unique = plot_data[metric].nunique()
-        all_constant = all_unique <= 1 or all(np.nanstd(g) == 0 for g in group_data_lists if len(g) > 0)
+        all_vals = np.concatenate([g for g in group_data_lists if len(g) > 0])
+        all_constant = len(all_vals) == 0 or (np.nanmax(all_vals) == np.nanmin(all_vals))
 
         # Overall significance test (Kruskal-Wallis for non-parametric), with safeguards
         pairwise_results = []
-        if not all_constant:
+        if not all_constant and len(group_data_lists) >= 2:
             try:
                 kw_stat, kw_p = kruskal(*group_data_lists)
             except Exception:
@@ -494,39 +637,60 @@ class StatisticalVisualizer:
 
         # Pairwise comparisons with Mann-Whitney U tests (only if overall test significant)
         alpha = 0.05
+        pairwise_data = []
         if (kw_p is not None) and (not np.isnan(kw_p)) and kw_p < alpha:
+            # Collect all pairwise p-values first
+            pairwise_pvals = []
+            pairwise_info = []
+            
             for i, j in combinations(range(n_groups), 2):
                 group1_data = group_data_lists[i]
                 group2_data = group_data_lists[j]
                 if len(group1_data) > 0 and len(group2_data) > 0:
                     # Skip degenerate pairs
                     if (np.nanstd(group1_data) == 0 and np.nanstd(group2_data) == 0 and
+                        len(group1_data) > 0 and len(group2_data) > 0 and
                         np.allclose(np.nanmean(group1_data), np.nanmean(group2_data))):
                         continue
                     try:
                         u_stat, p_val = mannwhitneyu(group1_data, group2_data, alternative='two-sided')
-                        # Bonferroni correction
-                        n_comparisons = len(list(combinations(range(n_groups), 2)))
-                        p_corrected = min(p_val * n_comparisons, 1.0)
-                        pairwise_results.append({
+                        pairwise_pvals.append(p_val)
+                        pairwise_info.append({
                             'group1': groups[i],
                             'group2': groups[j],
                             'p_value': p_val,
-                            'p_corrected': p_corrected,
-                            'significant': p_corrected < alpha,
-                            'positions': (i, j)
+                            'positions': (i, j),
+                            'n1': len(group1_data),
+                            'n2': len(group2_data)
                         })
                     except Exception:
                         continue
+            
+            # Apply Holm correction (less conservative than Bonferroni)
+            if len(pairwise_pvals) > 0:
+                # Sort p-values and apply Holm correction
+                sorted_indices = np.argsort(pairwise_pvals)
+                n_comparisons = len(pairwise_pvals)
+                
+                for rank, idx in enumerate(sorted_indices):
+                    # Holm correction: p_adj = p * (n_comparisons - rank)
+                    p_adj = pairwise_pvals[idx] * (n_comparisons - rank)
+                    p_adj = min(p_adj, 1.0)
+                    
+                    pairwise_info[idx]['p_corrected'] = p_adj
+                    pairwise_info[idx]['significant'] = p_adj < alpha
+                
+                pairwise_data = pairwise_info
 
-        # Add significance bars
+        # Add significance bars using corrected results
         y_max = plot_data[metric].max()
         y_min = plot_data[metric].min()
         y_range = max(y_max - y_min, 1e-6)
         bar_height = y_max + 0.05 * y_range
         sig_height_increment = 0.08 * y_range
         current_height = bar_height
-        for result in pairwise_results:
+        
+        for result in pairwise_data:
             if result['significant']:
                 pos1, pos2 = result['positions']
                 ax.plot([pos1, pos1, pos2, pos2], 
@@ -544,6 +708,25 @@ class StatisticalVisualizer:
                         ha='center', va='bottom', fontweight='bold', fontsize=12)
                 current_height += sig_height_increment
 
+        # Add legend if image-level data is shown
+        if use_image_level:
+            ax.legend(loc='upper right', frameon=False, fontsize=10)
+
+        # Add sample size and testing method annotation
+        if use_image_level:
+            n_images_total = df_image['image_name'].nunique()
+            n_nuclei_total = len(plot_data)
+            method_text = f"Statistical testing: {test_data_description}\n(n_images={n_images_total}, n_nuclei={n_nuclei_total})"
+        else:
+            n_nuclei_total = len(plot_data)
+            if use_image_aggregation:
+                method_text = f"Statistical testing: {test_data_description} (n_nuclei={n_nuclei_total})\nWarning: Potential pseudoreplication"
+            else:
+                method_text = f"Statistical testing: {test_data_description} (n_nuclei={n_nuclei_total})\nPer-nucleus testing (as requested)"
+        
+        ax.text(0.02, 0.98, method_text, transform=ax.transAxes, fontsize=9, 
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
         # Customize plot and annotations
         ax.set_xticks(range(len(groups)))
         ax.set_xticklabels(groups, rotation=45, ha='right')
@@ -559,26 +742,33 @@ class StatisticalVisualizer:
             clean_metric = metric.replace('_', ' ').title()
             ax.set_title(f'{clean_metric} Across Experimental Groups', fontsize=14, fontweight='bold', pad=20)
 
-        # Add statistical test info
+        # Add statistical test results to the plot
         if (kw_p is None) or np.isnan(kw_p):
             kw_text = 'Kruskal-Wallis: n/a'
         elif kw_p < 0.001:
             kw_text = 'Kruskal-Wallis: p < 0.001'
         else:
             kw_text = f'Kruskal-Wallis: p = {kw_p:.3f}'
-        ax.text(0.02, 0.98, kw_text, transform=ax.transAxes, fontsize=10, 
-                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        # Combine method info with KW results
+        combined_text = f"{method_text}\n{kw_text}"
+        ax.text(0.02, 0.98, combined_text, transform=ax.transAxes, fontsize=9, 
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
-        # Add sample sizes
+        # Add sample sizes per group
         sample_text = []
         for group in groups:
-            n = len(plot_data[plot_data[group_column] == group])
-            sample_text.append(f'{group}: n={n}')
+            n_nuclei = len(plot_data[plot_data[group_column] == group])
+            if use_image_level:
+                n_images = len(df_image[df_image[group_column] == group])
+                sample_text.append(f'{group}: {n_images} images, {n_nuclei} nuclei')
+            else:
+                sample_text.append(f'{group}: {n_nuclei} nuclei')
         ax.text(0.02, 0.02, '\n'.join(sample_text), transform=ax.transAxes, fontsize=9,
-                verticalalignment='bottom', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+                verticalalignment='bottom', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
 
-        # Adjust y-axis limits
-        if pairwise_results and any(r['significant'] for r in pairwise_results):
+        # Adjust y-axis limits to accommodate significance bars
+        if pairwise_data and any(r['significant'] for r in pairwise_data):
             ax.set_ylim(bottom=y_min - 0.05 * y_range, top=current_height + 0.1 * y_range)
 
         ax.grid(True, alpha=0.3)

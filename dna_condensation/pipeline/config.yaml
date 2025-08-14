@@ -2,10 +2,27 @@
 # Edit the values below for your specific analysis
 
 # ==== FILE PATHS ====
-# REQUIRED: Set the path to your ND2 files
+# ==== INPUT SOURCE CONFIGURATION ====
+input_source: "nd2"        # Options: "nd2" or "bbbc022"
+
+# ND2 file processing paths
 raw_nd2_path: "G:/My Drive/KatzLab/DNA-condensation-quantification/raw_nd2"  # Path to folder containing ND2 files
-output_path: "./output"         # Where to save results
+nd2_output_path: "./output"     # Where to save ND2 analysis results
+
+# BBBC022 processing paths  
+validation_output_path: "dna_condensation/validation/output"  # Where to save BBBC022 validation results (kept inside package tree)
 temp_path: "./temp"             # Temporary processing files
+
+# ==== BBBC022 VALIDATION SETTINGS ====
+bbbc022_settings:
+  count: 20                     # Number of images to sample for validation
+  channels: ['OrigHoechst']     # Channels to load (DNA staining)
+  seed: 42                      # Random seed for reproducible sampling
+  auto_group_split: false       # Set to false to use manual group mapping (automatic not yet implemented)
+  # Manual group mapping (required when auto_group_split: false)
+  group_mapping:                # Manual specification of control vs treatment wells
+    control: ["A01", "A23", "B04", "B05", "D08", "D14", "D22", "E06", "E17", "F08"]       # Control wells (first 10)
+    treatment: ["G10", "I07", "I08", "I12", "J07", "J16", "K11", "L23", "M03"]           # Treatment wells (remaining 9)
 
 # ==== MICROSCOPE SETTINGS ====
 # Adjust these based on your microscope configuration
@@ -15,7 +32,7 @@ image_channels:
 
 # ==== SEGMENTATION SETTINGS ====
 # Channel selection for nucleus segmentation
-segmentation_channel_index: 1   # index to use for quantification (1 = DNA staining channel) 
+segmentation_channel_index: 0   # index to use for quantification (0 = single channel for BBBC022) 
 # Segmentation method: 'yolo' (AI-based) or 'watershed' (traditional image processing)
 segmentation_method: "otsu"    # Options: "yolo", "watershed", 'otsu'
 
@@ -23,6 +40,26 @@ segmentation_method: "otsu"    # Options: "yolo", "watershed", 'otsu'
 size_filtering:
   enabled: true                 # Enable/disable size-based filtering
   min_size_percentage: 20       # Minimum size as percentage of median (e.g., 20 = 20% of median)
+
+# Quality filtering for feature extraction (percentage-based, adaptive)
+quality_filtering:
+  enabled: true                 # Enable/disable quality filtering in feature extraction
+  area_percentiles:             # Area-based filtering using percentiles of detected objects
+    min_percentile: 1           # Minimum area (1st percentile - very permissive for BBBC022)
+    max_percentile: 99          # Maximum area (99th percentile - very permissive for BBBC022)
+  intensity_filtering:          # Intensity-based quality checks
+    min_dynamic_range: 1e-6     # Minimum intensity range (max - min)
+    min_mean_intensity: 1e-6    # Minimum mean intensity (avoid pure background)
+    min_pixel_count: 10         # Minimum number of pixels per nucleus
+  geometry_filtering:           # Basic geometry validation
+    min_perimeter: 4            # Minimum perimeter (avoid degenerate shapes)
+
+# Feature extraction configuration
+feature_extraction:
+  high_intensity_percentile: 90   # Percentile for high-intensity fraction calculation
+  radial_shells: 5                # Number of radial shells for spatial analysis
+  texture_distance: 1             # Distance for texture analysis (GLCM)
+  granulometry_radii: [3, 5, 7, 10, 15]  # Radii for granulometry analysis
 
 #=== SIZE FILTERING SUMMARY EXAMPLE ===
 # Original objects: 66
@@ -37,7 +74,7 @@ preprocessing:
   background_correction: true   # Apply rolling ball background correction (RECOMMENDED)
   deconvolution: false         # Apply Richardson-Lucy deconvolution (optional, slower)
   intensity_normalization: true # Apply global intensity normalization (recommended for batch comparison)
-  per_nucleus_normalization: false  # Apply per-nucleus normalization for homogeneity analysis
+  per_nucleus_normalization: true  # Apply per-nucleus normalization for homogeneity analysis
   # Advanced parameters
   bg_ball_radius: 75           # Rolling ball radius (adjust based on nucleus size)
   deconv_iterations: 10        # Deconvolution iterations
@@ -48,6 +85,13 @@ z_collapse_method: "mean"       # Options: "max", "mean", "sum", "median"
 
 # GPU acceleration
 use_gpu: true                   # Enable GPU acceleration if available
+
+# ==== STATISTICAL ANALYSIS SETTINGS ====
+# Controls how statistical tests are performed across the entire pipeline
+statistical_analysis:
+  use_image_aggregation: true   # Use image-level aggregation to avoid pseudoreplication (RECOMMENDED)
+                               # When true: Statistical tests use image-level medians (proper biological replicates)
+                               # When false: Statistical tests use per-nucleus data (may have pseudoreplication issues)
 
 # Plotting and visualization
 plot:

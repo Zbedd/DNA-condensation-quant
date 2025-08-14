@@ -8,6 +8,7 @@ sys.path.insert(0, str(project_root))
 # Imports
 import os
 import shutil
+import numpy as np
 from datetime import datetime
 from dna_condensation.pipeline.config import Config
 from dna_condensation.core.image_loader import get_nd2_objects
@@ -42,45 +43,148 @@ Channel information:
 '''
 
 def main():
+  # Get input source configuration
+  input_source = config.get("input_source")
+  
+  # Input-specific preparation - only loads/prepares raw images and metadata
+  if input_source == "nd2":
+    raw_images, image_names, metadata = prepare_nd2_inputs()
+    output_dir = Path(config.get("nd2_output_path", "./output"))
+  elif input_source == "bbbc022":
+    raw_images, image_names, metadata = prepare_bbbc022_inputs()
+    output_dir = Path(config.get("validation_output_path", "dna_condensation/validation/output"))
+  else:
+    raise ValueError(f"Invalid input_source '{input_source}'. Must be 'nd2' or 'bbbc022'.")
+  
+  # Single common pipeline - same preprocessing, segmentation, and analysis for both sources
+  run_unified_pipeline(raw_images, image_names, metadata, output_dir)
+
+
+def prepare_nd2_inputs():
+  """Load and prepare ND2 files - returns raw collapsed images only"""
   nd2_folder_path = config.get("raw_nd2_path")
 
-  # # Iterate over every ND2 file and check channel count consistency
-  # nd2_files = [f for f in os.listdir(nd2_folder_path) if f.lower().endswith('.nd2')]
-  # channel_counts = set()
-  # for nd2_file in nd2_files:
-  #   nd2_path = os.path.join(nd2_folder_path, nd2_file)
-  #   info = characterize_nd2(nd2_path, verbose=False)
-  #   channel_counts.add(info.get('axes'))
-  # print(channel_counts)
-
-  # if len(channel_counts) == 1:
-  #   print(f"All ND2 files have the same channel count: {channel_counts.pop()}")
-  # else:
-  #   print(f"Inconsistent channel counts found: {channel_counts}")
-  
-  # Example main function for batch processing
   if nd2_folder_path is None:
-    print("Raw ND2 folder path not specified in config.")
-    return
+    raise ValueError("Raw ND2 folder path not specified in config.")
 
   if not os.path.exists(nd2_folder_path):
-    print(f"ND2 folder not found: {nd2_folder_path}")
-    return
+    raise ValueError(f"ND2 folder not found: {nd2_folder_path}")
 
   print(f"Processing ND2 folder: {nd2_folder_path}")
   nd2_objects = get_nd2_objects(nd2_folder_path)
   
   print(f"Collapsing z-axis for {len(nd2_objects)} ND2 files")
-  collapsed_images = batch_collapse_z_axis(nd2_objects, method='mean')
+  collapsed_images = batch_collapse_z_axis(nd2_objects, method=config.get("z_collapse_method", "mean"))
   
-  # Get segmentation parameters from config
+  # Extract image names for ND2 files - metadata will be extracted from filenames
+  image_names = [str(Path(nd2_obj.filename).name) for nd2_obj in nd2_objects]
+  
+  # For ND2, we pass None as metadata to signal that analysis should extract from filenames
+  metadata = None
+
+  return collapsed_images, image_names, metadata
+
+
+def prepare_bbbc022_inputs():
+  """Load and prepare BBBC022 images - returns raw images only"""
+  print("\n" + "="*60)
+  print("LOADING BBBC022 VALIDATION DATASET")
+  print("="*60)
+  
+  # Get BBBC022 configuration
+  bbbc022_config = config.get("bbbc022_settings", {})
+  validation_output_path = Path(config.get("validation_output_path", "dna_condensation/validation/output"))
+  validation_output_path.mkdir(parents=True, exist_ok=True)
+  
+  # Load raw BBBC022 images using existing loader
+  from dna_condensation.core.image_loader import load_bbbc022_images
+  
+  raw_images, metadata = load_bbbc022_images(
+    count=bbbc022_config.get('count', 20),
+    channels=bbbc022_config.get('channels', ['OrigHoechst']),
+    seed=bbbc022_config.get('seed', 42),
+    output_dir=str(validation_output_path / "bbbc022_data")
+  )
+  
+  print(f"✓ Loaded {len(raw_images)} BBBC022 images")
+  
+  # Convert to uint8 if needed (BBBC022 images come as float32)
+  converted_images = []
+  for i, img in enumerate(raw_images):
+    if img.dtype != np.uint8:
+      if img.dtype == np.float32:
+        # Check the range and convert appropriately
+        if img.max() <= 1.0:
+          img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
+        else:
+          img_uint8 = np.clip(img, 0, 255).astype(np.uint8)
+      else:
+        img_uint8 = np.clip(img, 0, 255).astype(np.uint8)
+      converted_images.append(img_uint8)
+    else:
+      converted_images.append(img)
+  
+  # Add experimental metadata (control vs treatment groups)
+  # Use the grouping configuration from bbbc022_settings
+  group_mapping = bbbc022_config.get('group_mapping')
+  auto_group_split = bbbc022_config.get('auto_group_split', True)
+  
+  if not auto_group_split and group_mapping:
+    # Manual group mapping using well IDs
+    control_wells = set(group_mapping.get("control", []))
+    treatment_wells = set(group_mapping.get("treatment", []))
+    
+    enhanced_metadata = []
+    for i, meta in enumerate(metadata):
+      enhanced_meta = meta.copy()
+      well = meta.get('well', '')
+      
+      if well in control_wells:
+        enhanced_meta['condition'] = 'control'
+        enhanced_meta['dk_group'] = 'mock'
+      elif well in treatment_wells:
+        enhanced_meta['condition'] = 'treatment' 
+        enhanced_meta['dk_group'] = 'compound'
+      else:
+        raise ValueError(f"Well '{well}' not found in manual group mapping. "
+                        f"Control wells: {control_wells}, Treatment wells: {treatment_wells}")
+      
+      # Ensure image_name is set
+      if 'image_name' not in enhanced_meta:
+        enhanced_meta['image_name'] = enhanced_meta.get('filename', f'bbbc022_image_{i+1}')
+      
+      enhanced_metadata.append(enhanced_meta)
+      
+  else:
+    # Automatic group identification - this should use proper BBBC022 metadata
+    # For now, raise an error until we implement proper metadata loading
+    raise NotImplementedError(
+      "Automatic BBBC022 group identification not yet implemented. "
+      "Please use manual group mapping in config.yaml by setting:\n"
+      "bbbc022_settings:\n"
+      "  auto_group_split: false\n"
+      "  group_mapping:\n"
+      "    control: ['A01', 'A02', ...]  # Add actual control well IDs\n"
+      "    treatment: ['B01', 'B02', ...] # Add actual treatment well IDs"
+    )
+  
+  image_names = [meta['image_name'] for meta in enhanced_metadata]
+  
+  return converted_images, image_names, enhanced_metadata
+
+
+def run_unified_pipeline(raw_images, image_names, metadata, output_dir):
+  """Single unified pipeline for preprocessing, segmentation, and analysis"""
+  print("\n" + "="*60)
+  print("RUNNING UNIFIED PROCESSING PIPELINE")
+  print("="*60)
+  
+  # Get configuration parameters
   channel_index = config.get("segmentation_channel_index")
   segmentation_method = config.get("segmentation_method")
-  
-  # Get preprocessing configuration
   preprocessing_config = config.get("preprocessing")
   
-  # Apply global preprocessing if enabled in config
+  # === GLOBAL PREPROCESSING ===
   global_preprocessed = None
   if any([preprocessing_config.get("background_correction"), 
           preprocessing_config.get("deconvolution"), 
@@ -98,7 +202,7 @@ def main():
     
     print(f"Applying global preprocessing: {' → '.join(methods)}")
     global_preprocessed = bulk_preprocess_images(
-      collapsed_images,
+      raw_images,
       channel_index=channel_index,
       methods=methods,
       bg_ball_radius=preprocessing_config.get("bg_ball_radius", 50),
@@ -106,16 +210,13 @@ def main():
       norm_method=preprocessing_config.get("norm_method", "percentile")
     )
   else:
-    # Skip preprocessing - use raw collapsed images
-    global_preprocessed = collapsed_images
+    # Skip preprocessing - use raw images
+    global_preprocessed = raw_images
     print("No global preprocessing applied")
   
+  # === SEGMENTATION ===
   # Configure size-based filtering to remove segmentation artifacts
   size_filter_config = config.get("size_filtering")
-  
-  # Set up visualization options
-  plot_config = config.get("plot")
-  plot_segmentation = plot_config.get("plot_segmentation") 
   
   filter_status = f"with {size_filter_config.get('min_size_percentage')}% size filter" if size_filter_config.get('enabled') else "no size filtering"
   print(f'Segmenting processed images with {segmentation_method.upper()} model (using channel {channel_index}, {filter_status})')
@@ -125,14 +226,13 @@ def main():
   masks = bulk_segment_images(global_preprocessed, channel_index=channel_index, method=segmentation_method, 
                              size_filter_config=size_filter_config, return_labels=True)
 
+  # === PER-NUCLEUS PREPROCESSING ===
   # Apply per-nucleus intensity normalization if enabled (alternative to global normalization)
   # This normalizes each nucleus individually to target_mean, useful for homogeneity analysis
   per_nucleus_preprocessed = None
-  per_nucleus_stats = None
   if preprocessing_config.get("per_nucleus_normalization") and masks[0] is not None:
     print("Applying per-nucleus intensity normalization...")
     per_nucleus_preprocessed = []
-    per_nucleus_stats = []
     
     for i, (image, labels) in enumerate(zip(global_preprocessed, masks)):
       if image is not None and labels is not None:
@@ -148,15 +248,17 @@ def main():
           channel_image, labels, target_mean=1.0, verbose=(i == 0)
         )
         per_nucleus_preprocessed.append(norm_image)
-        per_nucleus_stats.append(stats)
       else:
         per_nucleus_preprocessed.append(None)
-        per_nucleus_stats.append({})
   
-  # Visualization if enabled
+  # === VISUALIZATION ===
+  # Set up visualization options
+  plot_config = config.get("plot")
+  plot_segmentation = plot_config.get("plot_segmentation") 
+  
   if plot_segmentation and masks[0] is not None:
     # Prepare image for visualization - extract the same channel used for segmentation
-    first_image = collapsed_images[0]
+    first_image = raw_images[0]
     if first_image.ndim == 3:
       # Multi-channel image - extract the channel used for segmentation
       display_image = first_image[:, :, channel_index]
@@ -182,20 +284,24 @@ def main():
     else:
       # Fallback to standard visualization
       plot_image_mask(display_image, masks[0])
+  
+  # === DETERMINE FINAL IMAGES ===
+  # Determine which images to use for analysis (final preprocessed images)
+  final_images = per_nucleus_preprocessed if per_nucleus_preprocessed else global_preprocessed
+  
+  # === ANALYSIS PIPELINE ===
+  run_common_analysis_pipeline(final_images, masks, image_names, metadata, output_dir)
 
-  # === DNA CONDENSATION ANALYSIS ===
+
+def run_common_analysis_pipeline(final_images, masks, image_names, metadata, output_dir):
+  """Run the analysis pipeline - same for both ND2 and BBBC022"""
   print("\n" + "="*60)
   print("RUNNING DNA CONDENSATION ANALYSIS")
   print("="*60)
   
-  # Determine which images to use for analysis (final preprocessed images)
-  final_images = per_nucleus_preprocessed if per_nucleus_preprocessed else global_preprocessed
-  
-  # Extract image names for analysis
-  image_names = [str(Path(nd2_obj.filename).name) for nd2_obj in nd2_objects]
-
   # Prepare timestamped output directory structure
-  root_output = Path("dna_condensation_analysis_results")
+  output_dir = Path(output_dir)
+  root_output = output_dir / "dna_condensation_analysis_results"
   root_output.mkdir(parents=True, exist_ok=True)
   
   # Create unique timestamped subfolder for this analysis run
@@ -215,12 +321,79 @@ def main():
   
   # Execute comprehensive feature extraction and statistical analysis
   try:
-    analysis_results = run_analysis_from_batch_processor(
-      final_images, masks, image_names, 
-      output_dir=str(run_output)
-    )
+    # Get image aggregation setting from config
+    statistical_config = config.get("statistical_analysis", {})
+    use_image_aggregation = statistical_config.get("use_image_aggregation", True)
+    
+    # Handle metadata sources differently:
+    # - ND2: metadata=None, use filename parsing via original extract_experimental_metadata
+    # - BBBC022: metadata=list, use provided metadata via patching
+    from dna_condensation.analysis import feature_extractor as _fe
+    from dna_condensation.analysis import analysis_pipeline as _ap
+    _orig_extract = getattr(_fe, 'extract_experimental_metadata', None)
+    _orig_ap_extract = getattr(_ap, 'extract_experimental_metadata', None)
+
+    if metadata is None:
+      # ND2 case: Use original metadata extraction from filenames
+      print("Using filename-based metadata extraction for ND2 files")
+      analysis_results = run_analysis_from_batch_processor(
+        final_images, masks, image_names, 
+        output_dir=str(run_output),
+        use_image_aggregation=use_image_aggregation,
+        config=config._config
+      )
+    else:
+      # BBBC022 case: Patch metadata extraction to use provided metadata
+      print("Using provided metadata for BBBC022 files")
+      
+      def _patched_extract(image_names_list):
+        import pandas as pd
+
+        # Create fast lookup by image_name
+        meta_by_name = {m.get('image_name', m.get('filename', '')): m for m in metadata}
+
+        records = []
+        for name in image_names_list:
+          m = meta_by_name.get(name, {})
+          if not m:
+            raise ValueError(f"No metadata found for image '{name}'. Available images: {list(meta_by_name.keys())}")
+          
+          records.append({
+            'image_name': name,
+            'dk_group': m.get('dk_group', 'unknown'),
+            'dk_number': m.get('dk_number'),
+            'condition': m.get('condition', 'unknown'), 
+            'well': m.get('well'),
+            'timepoint': m.get('timepoint', m.get('plate', 'BBBC022'))
+          })
+        return pd.DataFrame(records)
+
+      # Apply patch
+      if callable(_orig_extract):
+        _fe.extract_experimental_metadata = _patched_extract
+      if callable(_orig_ap_extract):
+        _ap.extract_experimental_metadata = _patched_extract
+
+      analysis_results = run_analysis_from_batch_processor(
+        final_images, masks, image_names, 
+        output_dir=str(run_output),
+        use_image_aggregation=use_image_aggregation,
+        config=config._config
+      )
+      
+      # Restore original functions
+      if callable(_orig_extract):
+        _fe.extract_experimental_metadata = _orig_extract
+      if callable(_orig_ap_extract):
+        _ap.extract_experimental_metadata = _orig_ap_extract
     print("\n✓ DNA condensation analysis completed successfully!")
     print(f"Results saved to: {run_output}/")
+    
+    # Restore original extractor to avoid side effects
+    if callable(_orig_extract):
+      _fe.extract_experimental_metadata = _orig_extract
+    if callable(_orig_ap_extract):
+      _ap.extract_experimental_metadata = _orig_ap_extract
     
     # Generate single-metric significance plots if configured
     plot_config = config.get("plot", {})
@@ -281,6 +454,9 @@ def main():
         else:
           visualizer = StatisticalVisualizer()
           print(f"\n📊 Creating standalone plot(s) for {len(metrics_to_plot)} metric(s)...")
+          
+          # Use the same aggregation setting as statistical analysis for consistency
+          
           for metric_to_plot in metrics_to_plot:
             try:
               save_path = single_plots_dir / f"single_metric_{metric_to_plot}.png"
@@ -288,7 +464,8 @@ def main():
                 df=features_df,
                 metric=metric_to_plot,
                 group_column='condition',
-                save_path=save_path
+                save_path=save_path,
+                use_image_aggregation=use_image_aggregation
               )
               print(f"✓ Saved: {save_path}")
             except Exception as e:
@@ -335,7 +512,6 @@ def main():
     print(f"\n✗ Analysis failed: {e}")
     print("Continuing with basic processing...")
 
-  '''CHECK THE FORMAT OF MASKS'''
 
 if __name__ == "__main__":
   main()

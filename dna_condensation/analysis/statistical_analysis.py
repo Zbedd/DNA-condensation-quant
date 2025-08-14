@@ -26,7 +26,7 @@ class DNACondensationStatistics:
     - Effect size calculations
     """
     
-    def __init__(self, alpha: float = 0.05):
+    def __init__(self, alpha: float = 0.05, use_image_aggregation: bool = True):
         """
         Initialize statistical analysis.
         
@@ -34,9 +34,50 @@ class DNACondensationStatistics:
         -----------
         alpha : float
             Significance level for hypothesis testing
+        use_image_aggregation : bool
+            If True, aggregate to image level before statistical testing to avoid pseudoreplication
         """
         self.alpha = alpha
+        self.use_image_aggregation = use_image_aggregation
         self.results = {}
+        
+    def _aggregate_by_image(self, df: pd.DataFrame, group_column: str = 'condition') -> pd.DataFrame:
+        """
+        Aggregate nucleus-level data to image level to avoid pseudoreplication.
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Nucleus-level feature dataframe
+        group_column : str
+            Column containing experimental group information
+            
+        Returns:
+        --------
+        pd.DataFrame
+            Image-level aggregated data with median values per feature
+        """
+        if 'image_name' not in df.columns:
+            warnings.warn("No 'image_name' column found. Cannot aggregate by image. Using per-nucleus data.")
+            return df
+            
+        # Identify feature columns (exclude metadata)
+        exclude_cols = {
+            'image_name', 'nucleus_id', 'centroid_x', 'centroid_y',
+            'dk_group', 'dk_number', 'condition', 'well', 'timepoint'
+        }
+        feature_cols = [col for col in df.columns if col not in exclude_cols]
+        
+        # Group by image and experimental condition, take median of features
+        groupby_cols = ['image_name', group_column]
+        
+        # Aggregate features using median (robust to outliers)
+        agg_dict = {col: 'median' for col in feature_cols}
+        df_aggregated = df.groupby(groupby_cols).agg(agg_dict).reset_index()
+        
+        print(f"Aggregated from {len(df)} nuclei to {len(df_aggregated)} images for statistical testing")
+        
+        return df_aggregated
         
     def quality_control(self, df: pd.DataFrame, 
                        outlier_threshold: float = 3.0) -> pd.DataFrame:
@@ -71,11 +112,14 @@ class DNACondensationStatistics:
             df = df[~area_outliers]
             print(f"Removed {area_outliers.sum()} nuclei with extreme area")
         
-        # Remove nuclei with very low signal
+        # Remove nuclei with very low signal (skip for tiny datasets to avoid over-filtering in tests)
         if 'mean_intensity' in df.columns:
-            intensity_outliers = df['mean_intensity'] < np.percentile(df['mean_intensity'], 1)
-            df = df[~intensity_outliers]
-            print(f"Removed {intensity_outliers.sum()} nuclei with very low signal")
+            if len(df) >= 10:
+                intensity_outliers = df['mean_intensity'] < np.percentile(df['mean_intensity'], 1)
+                df = df[~intensity_outliers]
+                print(f"Removed {intensity_outliers.sum()} nuclei with very low signal")
+            else:
+                print("Skipped low-signal filtering for small sample size (<10 nuclei)")
         
         # Check normalization (if per-nucleus normalization was applied)
         if 'mean_intensity' in df.columns:
@@ -95,7 +139,7 @@ class DNACondensationStatistics:
         Parameters:
         -----------
         df : pd.DataFrame
-            Feature dataframe
+            Feature dataframe (nucleus-level or image-level)
         group_column : str
             Column name for grouping (e.g., 'condition', 'dk_group')
             
@@ -104,18 +148,34 @@ class DNACondensationStatistics:
         pd.DataFrame
             Descriptive statistics table
         """
+        # Apply image-level aggregation if enabled
+        if self.use_image_aggregation:
+            analysis_df = self._aggregate_by_image(df, group_column)
+            print(f"Descriptive statistics using image-level aggregation (n={len(analysis_df)} images)")
+        else:
+            analysis_df = df
+            print(f"Descriptive statistics using per-nucleus data (n={len(analysis_df)} nuclei)")
+        
         # Select numeric columns for analysis
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
+        numeric_cols = analysis_df.select_dtypes(include=[np.number]).columns
         feature_cols = [col for col in numeric_cols if col not in 
                        ['nucleus_id', 'centroid_x', 'centroid_y', 'dk_number', 'well']]
         
         # Group by condition and calculate statistics
         desc_stats = []
         
-        for group in df[group_column].unique():
-            group_data = df[df[group_column] == group]
-            n_nuclei = len(group_data)
-            n_images = group_data['image_name'].nunique() if 'image_name' in group_data.columns else 1
+        for group in analysis_df[group_column].unique():
+            group_data = analysis_df[analysis_df[group_column] == group]
+            n_observations = len(group_data)
+            
+            # For descriptive stats, report original nucleus counts and image counts
+            if self.use_image_aggregation:
+                original_group_data = df[df[group_column] == group]
+                n_nuclei = len(original_group_data)
+                n_images = original_group_data['image_name'].nunique() if 'image_name' in original_group_data.columns else 1
+            else:
+                n_nuclei = n_observations
+                n_images = group_data['image_name'].nunique() if 'image_name' in group_data.columns else 1
             
             for feature in feature_cols:
                 values = group_data[feature].dropna()
@@ -125,6 +185,7 @@ class DNACondensationStatistics:
                         'feature': feature,
                         'n_nuclei': n_nuclei,
                         'n_images': n_images,
+                        'n_statistical_units': n_observations,  # New field showing actual units used for stats
                         'mean': values.mean(),
                         'std': values.std(),
                         'median': values.median(),
@@ -189,7 +250,7 @@ class DNACondensationStatistics:
         Parameters:
         -----------
         df : pd.DataFrame
-            Feature dataframe
+            Feature dataframe (nucleus-level or image-level)
         features : List[str]
             Features to compare
         group_column : str
@@ -202,17 +263,25 @@ class DNACondensationStatistics:
         pd.DataFrame
             Statistical comparison results
         """
-        groups = df[group_column].unique()
+        # Apply image-level aggregation if enabled
+        if self.use_image_aggregation:
+            analysis_df = self._aggregate_by_image(df, group_column)
+            print(f"Statistical testing using image-level aggregation (n={len(analysis_df)} images)")
+        else:
+            analysis_df = df
+            print(f"Statistical testing using per-nucleus data (n={len(analysis_df)} nuclei)")
+        
+        groups = analysis_df[group_column].unique()
         comparison_results = []
         
         # Test normality if auto mode
         if test_type == 'auto':
-            normality_df = self.test_normality(df, features, group_column)
+            normality_df = self.test_normality(analysis_df, features, group_column)
         else:
             normality_df = pd.DataFrame()  # Empty DataFrame for non-auto modes
         
         for feature in features:
-            feature_data = df[feature].dropna()
+            feature_data = analysis_df[feature].dropna()
             if len(feature_data) == 0:
                 continue
                 
@@ -221,7 +290,7 @@ class DNACondensationStatistics:
             group_names = []
             
             for group in groups:
-                group_values = df[df[group_column] == group][feature].dropna()
+                group_values = analysis_df[analysis_df[group_column] == group][feature].dropna()
                 if len(group_values) > 0:
                     group_data.append(group_values)
                     group_names.append(group)
@@ -232,8 +301,11 @@ class DNACondensationStatistics:
             # Determine test type
             if test_type == 'auto':
                 # Check if all groups are normally distributed
-                feature_normality = normality_df[normality_df['feature'] == feature]
-                all_normal = feature_normality['is_normal'].all() if len(feature_normality) > 0 else False
+                if len(normality_df) > 0:
+                    feature_normality = normality_df[normality_df['feature'] == feature]
+                    all_normal = feature_normality['is_normal'].all() if len(feature_normality) > 0 else False
+                else:
+                    all_normal = False
                 use_parametric = all_normal
             elif test_type == 'parametric':
                 use_parametric = True
@@ -298,8 +370,30 @@ class DNACondensationStatistics:
                            group_column: str = 'condition') -> pd.DataFrame:
         """
         Perform pairwise comparisons between all groups.
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Feature dataframe (nucleus-level or image-level)
+        features : List[str]
+            Features to compare
+        group_column : str
+            Column for grouping
+            
+        Returns:
+        --------
+        pd.DataFrame
+            Pairwise comparison results
         """
-        groups = df[group_column].unique()
+        # Apply image-level aggregation if enabled
+        if self.use_image_aggregation:
+            analysis_df = self._aggregate_by_image(df, group_column)
+            print(f"Pairwise comparisons using image-level aggregation (n={len(analysis_df)} images)")
+        else:
+            analysis_df = df
+            print(f"Pairwise comparisons using per-nucleus data (n={len(analysis_df)} nuclei)")
+        
+        groups = analysis_df[group_column].unique()
         pairwise_results = []
         
         for feature in features:
@@ -308,8 +402,8 @@ class DNACondensationStatistics:
                     if i >= j:  # Avoid duplicate comparisons
                         continue
                         
-                    data1 = df[df[group_column] == group1][feature].dropna()
-                    data2 = df[df[group_column] == group2][feature].dropna()
+                    data1 = analysis_df[analysis_df[group_column] == group1][feature].dropna()
+                    data2 = analysis_df[analysis_df[group_column] == group2][feature].dropna()
                     
                     if len(data1) > 0 and len(data2) > 0:
                         # Use Mann-Whitney U (conservative choice)
@@ -343,9 +437,31 @@ class DNACondensationStatistics:
                             group_column: str = 'condition') -> Dict:
         """
         Perform multivariate analysis (PCA, clustering).
+        
+        Parameters:
+        -----------
+        df : pd.DataFrame
+            Feature dataframe (nucleus-level or image-level)
+        features : List[str]
+            Features for multivariate analysis
+        group_column : str
+            Column for grouping
+            
+        Returns:
+        --------
+        Dict
+            Multivariate analysis results
         """
+        # Apply image-level aggregation if enabled
+        if self.use_image_aggregation:
+            analysis_df = self._aggregate_by_image(df, group_column)
+            print(f"Multivariate analysis using image-level aggregation (n={len(analysis_df)} images)")
+        else:
+            analysis_df = df
+            print(f"Multivariate analysis using per-nucleus data (n={len(analysis_df)} nuclei)")
+        
         # Prepare data
-        feature_data = df[features].fillna(0)  # Fill NaN with 0
+        feature_data = analysis_df[features].fillna(0)  # Fill NaN with 0
         
         # Standardize features
         scaler = StandardScaler()
@@ -357,7 +473,7 @@ class DNACondensationStatistics:
         
         # Create PCA results dataframe
         pca_df = pd.DataFrame(pca_data, columns=[f'PC{i+1}' for i in range(pca_data.shape[1])])
-        pca_df[group_column] = df[group_column].values
+        pca_df[group_column] = analysis_df[group_column].values
         
         # K-means clustering
         n_clusters = min(len(df[group_column].unique()), 4)  # Reasonable number
@@ -441,6 +557,18 @@ class DNACondensationStatistics:
         report.append("=" * 60)
         report.append("")
         
+        # Analysis method information
+        if self.use_image_aggregation:
+            report.append("STATISTICAL APPROACH:")
+            report.append("  Image-level aggregation enabled (recommended to avoid pseudoreplication)")
+            report.append("  Statistical tests performed on image-level medians")
+            report.append("")
+        else:
+            report.append("STATISTICAL APPROACH:")
+            report.append("  Per-nucleus analysis (WARNING: may have pseudoreplication issues)")
+            report.append("  Statistical tests performed on individual nuclei")
+            report.append("")
+        
         # Data overview
         report.append("DATA OVERVIEW:")
         report.append(f"  Total nuclei: {len(df)}")
@@ -448,11 +576,16 @@ class DNACondensationStatistics:
         report.append(f"  Groups: {', '.join(df[group_column].unique())}")
         report.append("")
         
-        # Group sizes
-        group_counts = df[group_column].value_counts()
+        # Group sizes with image counts
         report.append("GROUP SIZES:")
-        for group, count in group_counts.items():
-            report.append(f"  {group}: {count} nuclei")
+        for group in df[group_column].unique():
+            group_data = df[df[group_column] == group]
+            n_nuclei = len(group_data)
+            n_images = group_data['image_name'].nunique() if 'image_name' in group_data.columns else 1
+            if self.use_image_aggregation:
+                report.append(f"  {group}: {n_nuclei} nuclei from {n_images} images (statistical n={n_images})")
+            else:
+                report.append(f"  {group}: {n_nuclei} nuclei from {n_images} images (statistical n={n_nuclei})")
         report.append("")
         
         # Key findings from comparisons

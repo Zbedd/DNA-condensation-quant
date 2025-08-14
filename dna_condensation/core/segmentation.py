@@ -37,8 +37,17 @@ def segment_image_yolo(image: np.ndarray, channel_index: int, use_gpu: bool = Tr
         - instance_labels: 2D uint16 array with unique IDs for each nucleus (0=background)
         - binary_mask: 2D boolean array marking all detected nuclear regions
     """
-    if not isinstance(image, np.ndarray) or image.dtype != np.uint8:
-        raise ValueError("Input image must be a numpy array of dtype uint8")
+    if not isinstance(image, np.ndarray):
+        raise ValueError("Input image must be a numpy array")
+    
+    # Handle dtype conversion for pipeline compatibility
+    if image.dtype != np.uint8:
+        if image.dtype in [np.float32, np.float64]:
+            # Convert float images back to uint8 (assume 0-255 range)
+            image = np.clip(image, 0, 255).astype(np.uint8)
+        else:
+            # For other dtypes, try direct conversion
+            image = image.astype(np.uint8)
     
     # Extract specific channel for segmentation (YOLO segmentation expects 2D)
     if image.ndim == 3:

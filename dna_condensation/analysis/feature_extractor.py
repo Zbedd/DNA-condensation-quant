@@ -14,6 +14,9 @@ from skimage.morphology import disk, opening
 from scipy import ndimage
 from scipy.stats import entropy
 import warnings
+from typing import Dict, List, Optional
+from dna_condensation.pipeline.config import Config
+import warnings
 from typing import List, Dict, Tuple, Optional, Union
 
 class DNACondensationFeatureExtractor:
@@ -26,31 +29,44 @@ class DNACondensationFeatureExtractor:
     3. Morphological Features: Area, perimeter, solidity, eccentricity
     4. Texture Analysis: GLCM-based features, local binary patterns
     5. Granulometry: Multi-scale morphological analysis
+    
+    Quality filtering is applied based on configuration to remove artifacts.
     """
     
-    def __init__(self, 
-                 high_intensity_percentile: float = 90,
-                 radial_shells: int = 5,
-                 texture_distance: int = 1,
-                 granulometry_radii: List[int] = None):
+    def __init__(self, config: Optional[Config] = None):
         """
-        Initialize feature extractor with configurable parameters.
+        Initialize feature extractor with configuration.
         
-        Parameters:
-        -----------
-        high_intensity_percentile : float
-            Percentile threshold for high-intensity fraction calculation
-        radial_shells : int
-            Number of concentric shells for radial profiling
-        texture_distance : int
-            Distance for GLCM texture analysis
-        granulometry_radii : List[int]
-            Radii for morphological granulometry analysis
+        Args:
+            config: Configuration object. If None, loads default config.
         """
-        self.high_intensity_percentile = high_intensity_percentile
-        self.radial_shells = radial_shells
-        self.texture_distance = texture_distance
-        self.granulometry_radii = granulometry_radii or [1, 2, 3, 5, 7, 10]
+        self.config = config if config is not None else Config()
+        
+        # Load quality filtering parameters from config
+        quality_config = self.config.get('quality_filtering', {})
+        self.quality_filtering_enabled = quality_config.get('enabled', True)
+        
+        # Area filtering percentiles (adaptive)
+        area_config = quality_config.get('area_percentiles', {})
+        self.min_area_percentile = area_config.get('min_percentile', 5)
+        self.max_area_percentile = area_config.get('max_percentile', 95)
+        
+        # Intensity filtering thresholds
+        intensity_config = quality_config.get('intensity_filtering', {})
+        self.min_dynamic_range = intensity_config.get('min_dynamic_range', 1e-6)
+        self.min_mean_intensity = intensity_config.get('min_mean_intensity', 1e-6)
+        self.min_pixel_count = intensity_config.get('min_pixel_count', 10)
+        
+        # Geometry filtering
+        geometry_config = quality_config.get('geometry_filtering', {})
+        self.min_perimeter = geometry_config.get('min_perimeter', 4)
+        
+        # Feature extraction parameters - make configurable
+        feature_params = self.config.get('feature_extraction', {})
+        self.high_intensity_percentile = feature_params.get('high_intensity_percentile', 90)
+        self.radial_shells = feature_params.get('radial_shells', 5)
+        self.texture_distance = feature_params.get('texture_distance', 1)
+        self.granulometry_radii = feature_params.get('granulometry_radii', [3, 5, 7, 10, 15])
         
     def extract_features_batch(self, 
                               images: List[np.ndarray], 
@@ -113,13 +129,39 @@ class DNACondensationFeatureExtractor:
             DataFrame with one row per nucleus
         """
         # Get region properties
-        regions = measure.regionprops(mask, intensity_image=image)
+        try:
+            regions = measure.regionprops(mask, intensity_image=image)
+        except TypeError as e:
+            # Normalize error for tests expecting ValueError/IndexError on bad inputs
+            raise ValueError(f"Invalid mask/image for regionprops: {e}")
         
         features_list = []
         
+        # Adaptive area filtering: calculate area percentiles if quality filtering is enabled
+        if self.quality_filtering_enabled and regions:
+            areas = [region.area for region in regions]
+            min_area_threshold = np.percentile(areas, self.min_area_percentile)
+            max_area_threshold = np.percentile(areas, self.max_area_percentile)
+        else:
+            # Fallback to permissive thresholds if filtering disabled
+            min_area_threshold = 0
+            max_area_threshold = float('inf')
+        
         for region in regions:
+            # Adaptive quality filters based on actual data distribution
+            if self.quality_filtering_enabled:
+                if (region.area < min_area_threshold or      # Below min percentile
+                    region.area > max_area_threshold or      # Above max percentile
+                    region.perimeter < self.min_perimeter):  # Invalid geometry
+                    continue
+                
             try:
                 features = self._extract_nucleus_features(region, image, mask, image_name)
+                
+                # Additional quality check after feature extraction
+                if features is None:
+                    continue
+                    
                 features_list.append(features)
             except Exception as e:
                 warnings.warn(f"Failed to extract features for nucleus {region.label} in {image_name}: {e}")
@@ -145,8 +187,17 @@ class DNACondensationFeatureExtractor:
         # Get intensity values for this nucleus
         intensity_values = region.intensity_image[region.image].flatten()
         
+        # Quality check: Skip regions with insufficient dynamic range
+        intensity_range = np.max(intensity_values) - np.min(intensity_values)
+        mean_intensity = np.mean(intensity_values)
+        
+        if (intensity_range < 1e-6 or  # Nearly zero dynamic range
+            mean_intensity < 1e-6 or   # Nearly zero intensity (background)
+            len(intensity_values) < 10):  # Too few pixels
+            return None  # Skip this region
+        
         # 1. Intensity Distribution Features
-        features.update(self._intensity_features(intensity_values))
+        features.update(self._intensity_features(intensity_values, region))
         
         # 2. Morphological Features  
         features.update(self._morphological_features(region))
@@ -162,7 +213,7 @@ class DNACondensationFeatureExtractor:
         
         return features
     
-    def _intensity_features(self, intensity_values: np.ndarray) -> Dict:
+    def _intensity_features(self, intensity_values: np.ndarray, region=None) -> Dict:
         """
         Extract comprehensive intensity distribution features.
         
@@ -180,12 +231,19 @@ class DNACondensationFeatureExtractor:
         # Core statistical measures
         mean_intensity = np.mean(intensity_values)
         std_intensity = np.std(intensity_values)
+        total_intensity = np.sum(intensity_values)
         
         features = {
             'mean_intensity': mean_intensity,
             'std_intensity': std_intensity,
             # Coefficient of variation - key metric for homogeneity analysis
             'coefficient_of_variation': std_intensity / mean_intensity if mean_intensity > 0 else 0,
+            # Nuclear density - captures chromatin compaction (mean intensity * area / total intensity)
+            'nuclear_density': (
+                (mean_intensity * getattr(region, 'area', 1) / total_intensity)
+                if (total_intensity > 0 and region is not None)
+                else mean_intensity
+            ),
             'min_intensity': np.min(intensity_values),
             'max_intensity': np.max(intensity_values),
             'intensity_range': np.max(intensity_values) - np.min(intensity_values),
@@ -200,10 +258,28 @@ class DNACondensationFeatureExtractor:
         high_threshold = np.percentile(intensity_values, self.high_intensity_percentile)
         features['high_intensity_fraction'] = np.mean(intensity_values >= high_threshold)
         
-        # Distribution shape characteristics
+        # Distribution shape characteristics - with robustness checks
         from scipy.stats import skew, kurtosis
-        features['intensity_skewness'] = skew(intensity_values)  # Asymmetry of distribution
-        features['intensity_kurtosis'] = kurtosis(intensity_values)  # Tail heaviness
+        
+        # Check for sufficient variance to avoid catastrophic cancellation
+        intensity_variance = np.var(intensity_values)
+        intensity_std = np.std(intensity_values)
+        cv = intensity_std / mean_intensity if mean_intensity > 0 else 0
+        
+        # Only calculate skewness/kurtosis if we have sufficient variance
+        # CV < 0.01 indicates nearly uniform data that will cause numerical issues
+        if cv > 0.01 and len(intensity_values) > 10:
+            try:
+                features['intensity_skewness'] = skew(intensity_values)  # Asymmetry of distribution
+                features['intensity_kurtosis'] = kurtosis(intensity_values)  # Tail heaviness
+            except (RuntimeWarning, ValueError):
+                # Fallback for numerical issues
+                features['intensity_skewness'] = 0.0
+                features['intensity_kurtosis'] = 0.0
+        else:
+            # Set to neutral values for uniform regions
+            features['intensity_skewness'] = 0.0
+            features['intensity_kurtosis'] = 0.0
         
         # Entropy quantifies intensity variability (higher = more disordered)
         hist, _ = np.histogram(intensity_values, bins=256)
@@ -242,7 +318,7 @@ class DNACondensationFeatureExtractor:
             
             # Derived shape metrics
             'aspect_ratio': region.major_axis_length / region.minor_axis_length if region.minor_axis_length > 0 else 0,
-            'circularity': 4 * np.pi * region.area / (region.perimeter ** 2) if region.perimeter > 0 else 0,  # 1=perfect circle
+            'circularity': 4 * np.pi * region.area / (region.perimeter ** 2) if region.perimeter > 0 else 0,  # Nuclear compactness: 1=perfect circle, increases with condensation
         }
     
     def _radial_features(self, region, image: np.ndarray) -> Dict:

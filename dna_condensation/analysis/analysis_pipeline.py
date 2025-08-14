@@ -32,7 +32,7 @@ class DNACondensationAnalysisPipeline:
     5. Report generation
     """
     
-    def __init__(self, output_dir: str = "analysis_results"):
+    def __init__(self, output_dir: str = "analysis_results", use_image_aggregation: bool = True, config: dict = None):
         """
         Initialize analysis pipeline.
         
@@ -40,13 +40,17 @@ class DNACondensationAnalysisPipeline:
         -----------
         output_dir : str
             Directory to save all analysis results
+        use_image_aggregation : bool
+            If True, use image-level aggregation for statistical tests to avoid pseudoreplication
+        config : dict, optional
+            Configuration dictionary for feature extraction parameters
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize components
-        self.feature_extractor = DNACondensationFeatureExtractor()
-        self.statistics = DNACondensationStatistics()
+        # Initialize components with config support
+        self.feature_extractor = DNACondensationFeatureExtractor(config=config)
+        self.statistics = DNACondensationStatistics(use_image_aggregation=use_image_aggregation)
         self.visualizer = StatisticalVisualizer()
         
         # Data storage
@@ -101,7 +105,28 @@ class DNACondensationAnalysisPipeline:
             self.metadata_df, on='image_name', how='left'
         )
         print("Merged features with experimental metadata")
-        print(f"Groups found: {', '.join(self.features_df[group_column].unique())}")
+        
+        # Validate that we have meaningful groups for comparison
+        unique_groups = self.features_df[group_column].unique()
+        print(f"Groups found: {', '.join(unique_groups)}")
+        
+        # Check for proper experimental groups
+        if len(unique_groups) < 2:
+            raise ValueError(
+                f"Insufficient groups for comparison analysis. Found only 1 group: '{unique_groups[0]}'. "
+                f"Need at least 2 groups. Check that:\n"
+                f"- ND2 filenames follow format: '48hr_[groupid]_[groupname]_...'\n" 
+                f"- BBBC022 group mapping is properly configured\n"
+                f"- Metadata extraction is working correctly"
+            )
+        
+        # Check for generic/placeholder groups that indicate parsing failure
+        generic_groups = {'unknown', 'nd2_sample', 'bbbc_sample'}
+        if any(group in generic_groups for group in unique_groups):
+            raise ValueError(
+                f"Found generic group names {generic_groups.intersection(set(unique_groups))} "
+                f"which indicates metadata parsing failed. Check filename format or group mapping."
+            )
         
         # Step 3: Quality control
         print("\n3. QUALITY CONTROL")
@@ -169,11 +194,14 @@ class DNACondensationAnalysisPipeline:
         # Step 7: Key findings
         print("\n7. KEY FINDINGS")
         print("-" * 30)
-        key_features = identify_key_features(self.comparison_results)
+        key_features = identify_key_features(self.comparison_results) if 'effect_size' in self.comparison_results.columns else self.comparison_results.nsmallest(10, 'p_value')['feature'].tolist()
         print(f"Top discriminative features:")
         for i, feature in enumerate(key_features[:10], 1):
             row = self.comparison_results[self.comparison_results['feature'] == feature].iloc[0]
-            print(f"  {i:2d}. {feature}: effect size = {row['effect_size']:.3f}, p = {row['p_value']:.4f}")
+            if 'effect_size' in row:
+                print(f"  {i:2d}. {feature}: effect size = {row['effect_size']:.3f}, p = {row.get('p_value', np.nan):.4f}")
+            else:
+                print(f"  {i:2d}. {feature}: p = {row.get('p_value', np.nan):.4f}")
         
         # Save all data
         self.features_df.to_csv(self.output_dir / 'all_features.csv', index=False)
@@ -365,7 +393,9 @@ class DNACondensationAnalysisPipeline:
 def run_analysis_from_batch_processor(images: List[np.ndarray],
                                     masks: List[np.ndarray],
                                     image_names: List[str],
-                                    output_dir: str = "dna_condensation_analysis") -> Dict:
+                                    output_dir: str = "dna_condensation_analysis",
+                                    use_image_aggregation: bool = True,
+                                    config: dict = None) -> Dict:
     """
     Convenience function to run analysis directly from batch processor results.
     
@@ -379,14 +409,18 @@ def run_analysis_from_batch_processor(images: List[np.ndarray],
         Image names from batch processor
     output_dir : str
         Output directory for results
+    use_image_aggregation : bool
+        If True, use image-level aggregation for statistical tests to avoid pseudoreplication
+    config : dict, optional
+        Configuration dictionary for feature extraction parameters
         
     Returns:
     --------
     Dict
         Complete analysis results
     """
-    # Initialize pipeline
-    pipeline = DNACondensationAnalysisPipeline(output_dir)
+    # Initialize pipeline with aggregation setting and config
+    pipeline = DNACondensationAnalysisPipeline(output_dir, use_image_aggregation=use_image_aggregation, config=config)
     
     # Run full analysis
     results = pipeline.run_full_analysis(images, masks, image_names)

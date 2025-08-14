@@ -48,6 +48,14 @@ coverage.xml
 *.cover
 *.py.cover
 .hypothesis/
+
+# BBBC022 validation data (large image files - ~7GB)
+dna_condensation/validation/output/bbbc022_data/
+*.tif
+
+# BBBC022 persistent cache (zip files and extracted images)
+.bbbc022_cache/
+
 .pytest_cache/
 cover/
 
