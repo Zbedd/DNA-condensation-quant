@@ -37,6 +37,14 @@ class Config:
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value."""
         return self._config.get(key, default)
+    
+    def set(self, key: str, value: Any) -> None:
+        """Set configuration value."""
+        self._config[key] = value
+    
+    def pop(self, key: str, default: Any = None) -> Any:
+        """Remove and return configuration value."""
+        return self._config.pop(key, default)
         
     def create_output_directories(self) -> None:
         """Create output and temp directories if they don't exist."""

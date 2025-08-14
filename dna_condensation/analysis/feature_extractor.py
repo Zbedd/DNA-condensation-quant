@@ -71,7 +71,8 @@ class DNACondensationFeatureExtractor:
     def extract_features_batch(self, 
                               images: List[np.ndarray], 
                               masks: List[np.ndarray],
-                              image_names: List[str] = None) -> pd.DataFrame:
+                              image_names: List[str] = None,
+                              feature_types: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Extract features from multiple images and masks.
         
@@ -83,6 +84,9 @@ class DNACondensationFeatureExtractor:
             List of labeled masks (2D, integer labels)
         image_names : List[str], optional
             Names/identifiers for each image
+        feature_types : List[str], optional
+            Specific feature types to extract. Options: 'intensity', 'morphology', 
+            'spatial', 'texture', 'granulometry'. If None, all are extracted.
             
         Returns:
         --------
@@ -99,7 +103,7 @@ class DNACondensationFeatureExtractor:
                 continue
                 
             print(f"Processing {name}: {np.max(mask)} nuclei")
-            features = self.extract_features_single(image, mask, name)
+            features = self.extract_features_single(image, mask, name, feature_types)
             all_features.append(features)
             
         if all_features:
@@ -110,7 +114,8 @@ class DNACondensationFeatureExtractor:
     def extract_features_single(self, 
                                image: np.ndarray, 
                                mask: np.ndarray,
-                               image_name: str = "unknown") -> pd.DataFrame:
+                               image_name: str = "unknown",
+                               feature_types: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Extract features from a single image-mask pair.
         
@@ -122,6 +127,8 @@ class DNACondensationFeatureExtractor:
             2D labeled mask (integer labels for each nucleus)
         image_name : str
             Identifier for this image
+        feature_types : List[str], optional
+            Specific feature types to extract.
             
         Returns:
         --------
@@ -156,7 +163,7 @@ class DNACondensationFeatureExtractor:
                     continue
                 
             try:
-                features = self._extract_nucleus_features(region, image, mask, image_name)
+                features = self._extract_nucleus_features(region, image, mask, image_name, feature_types)
                 
                 # Additional quality check after feature extraction
                 if features is None:
@@ -173,9 +180,14 @@ class DNACondensationFeatureExtractor:
                                  region,
                                  image: np.ndarray,
                                  mask: np.ndarray, 
-                                 image_name: str) -> Dict:
+                                 image_name: str,
+                                 feature_types: Optional[List[str]] = None) -> Dict:
         """Extract all features for a single nucleus."""
         
+        # If feature_types is None, extract all features
+        if feature_types is None:
+            feature_types = ['intensity', 'morphology', 'spatial', 'texture', 'granulometry']
+
         # Basic identifiers
         features = {
             'image_name': image_name,
@@ -197,19 +209,24 @@ class DNACondensationFeatureExtractor:
             return None  # Skip this region
         
         # 1. Intensity Distribution Features
-        features.update(self._intensity_features(intensity_values, region))
+        if 'intensity' in feature_types:
+            features.update(self._intensity_features(intensity_values, region))
         
         # 2. Morphological Features  
-        features.update(self._morphological_features(region))
+        if 'morphology' in feature_types:
+            features.update(self._morphological_features(region))
         
         # 3. Spatial/Radial Features
-        features.update(self._radial_features(region, image))
+        if 'spatial' in feature_types:
+            features.update(self._radial_features(region, image))
         
         # 4. Texture Features
-        features.update(self._texture_features(region))
+        if 'texture' in feature_types:
+            features.update(self._texture_features(region))
         
         # 5. Granulometry Features
-        features.update(self._granulometry_features(region))
+        if 'granulometry' in feature_types:
+            features.update(self._granulometry_features(region))
         
         return features
     

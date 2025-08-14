@@ -13,6 +13,21 @@ nd2_output_path: "./output"     # Where to save ND2 analysis results
 validation_output_path: "dna_condensation/validation/output"  # Where to save BBBC022 validation results (kept inside package tree)
 temp_path: "./temp"             # Temporary processing files
 
+# ==== ND2 SELECTION SETTINGS ====
+# Controls which and how many ND2 files get processed for faster development/testing
+nd2_selection_settings:
+  count: 5                    # Number of images to process (null = all files)
+  group_filters:                 # Content-based filtering using OR logic
+    ids: null                    # List of LSD1 IDs to include (e.g., ["dk16", "dk17"])
+    names: null                  # List of LSD1 names to include (e.g., ["wtLSD1", "mutLSD1"])
+    # OR Logic: file included if it contains ANY specified ID OR ANY specified name
+    # Example: ids: ["dk16"], names: ["mutLSD1"] → includes dk16_wtLSD1 OR dk17_mutLSD1 OR dk16_mutLSD1
+  file_pattern_filters:          # Pattern-based filtering on full filename
+    include_patterns: null       # List of patterns that must ALL be present (AND logic)
+    exclude_patterns: null       # List of patterns to exclude (if ANY present, file excluded)
+  seed: 42                       # Seed for reproducible balanced random sampling
+  # Note: Always uses balanced random sampling - equal representation across ID+name groups
+
 # ==== BBBC022 VALIDATION SETTINGS ====
 bbbc022_settings:
   count: 20                     # Number of images to sample for validation
@@ -117,6 +132,21 @@ plot:
     colormap: magma             # Colormap to emphasize intensity differences
     channel_index: 1            # Channel to visualize when image has multiple channels
     save_name: nuclei_panel.png # Output filename
+
+# ==== IMAGE VISUALIZATION SETTINGS ====
+# Configuration for visualize_images.py script
+image_visualization:
+  n_images: 6                   # Number of images to display in grid
+  stages:                       # Processing stages to show (options: raw, preprocessed, final, segmentation)
+    - raw
+    - preprocessed 
+    - segmentation
+  show_segmentation_overlay: true  # Show faint segmentation overlay on segmentation stage (toggleable)
+  overlay_alpha: 0.3            # Transparency of segmentation overlay (0.0=invisible, 1.0=opaque)
+  contour_color: "red"          # Color for segmentation contours (red, blue, green, yellow)
+  contour_width: 0.5            # Width of segmentation contour lines
+  figure_size: [15, 10]         # Figure size in inches [width, height]
+  colormap: "gray"              # Matplotlib colormap for image display
 
 # Verbose output
 verbose: true                   # Print detailed progress information

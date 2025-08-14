@@ -338,8 +338,31 @@ class DNACondensationStatistics:
                     test_name = "One-way ANOVA"
                 else:
                     # Kruskal-Wallis test
-                    statistic, p_value = stats.kruskal(*group_data)
-                    test_name = "Kruskal-Wallis"
+                    
+                    # Filter out groups with fewer than 2 samples, as they are not comparable
+                    min_sample_size = 2
+                    valid_groups = [g for g in group_data if len(g) >= min_sample_size]
+
+                    if len(valid_groups) < 2:
+                        warnings.warn(
+                            f"Skipping Kruskal-Wallis for feature '{feature}': "
+                            f"Fewer than 2 groups have sufficient samples (n>={min_sample_size})."
+                        )
+                        continue
+
+                    try:
+                        # Use only the valid groups for the test
+                        statistic, p_value = stats.kruskal(*valid_groups)
+                        test_name = "Kruskal-Wallis"
+                    except ValueError as e:
+                        if "All numbers are identical" in str(e):
+                            warnings.warn(
+                                f"Skipping Kruskal-Wallis for feature '{feature}': All aggregated values are identical. "
+                                f"This can happen with very small sample sizes or features with no variance."
+                            )
+                            continue  # Skip to the next feature
+                        else:
+                            raise e  # Re-raise other ValueErrors
             
             # Calculate effect size (Cohen's d for two groups, eta-squared for multiple)
             effect_size = self._calculate_effect_size(group_data, use_parametric)

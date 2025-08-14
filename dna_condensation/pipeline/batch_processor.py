@@ -9,9 +9,11 @@ sys.path.insert(0, str(project_root))
 import os
 import shutil
 import numpy as np
+import warnings
 from datetime import datetime
 from dna_condensation.pipeline.config import Config
 from dna_condensation.core.image_loader import get_nd2_objects
+from dna_condensation.core.config_validator import ND2SelectionValidator
 from dna_condensation.core.z_stack_handling import batch_collapse_z_axis
 from dna_condensation.core.preprocessor import bulk_preprocess_images, per_nucleus_intensity_normalization
 from dna_condensation.core.segmentation import bulk_segment_images
@@ -42,9 +44,64 @@ Channel information:
   Channel 1: Channel_1
 '''
 
-def main():
+def _check_direct_execution_with_count_limit(input_source):
+  """
+  Check if batch_processor is being run directly with count limitations for ND2 files.
+  Warns user that not all ND2 images will be processed and requires confirmation.
+  """
+  # Only apply to ND2 input source
+  if input_source != "nd2":
+    return
+  
+  # Check if ND2 selection settings specify a count limit
+  selection_config = config.get("nd2_selection_settings")
+  if selection_config is None:
+    return
+  
+  count_setting = selection_config.get("count")
+  if count_setting is None:
+    return
+  
+  # Display warning message
+  print("\n" + "=" * 60)
+  print("⚠️  WARNING: LIMITED ND2 FILE PROCESSING")
+  print("=" * 60)
+  print(f"\nYou are running batch_processor.py with a count limit of {count_setting} ND2 files.")
+  print("This means NOT ALL ND2 images in your folder will be processed for analysis.")
+  print("\nCurrent ND2 selection settings:")
+  
+  # Show current selection configuration
+  validator = ND2SelectionValidator()
+  print(validator.get_validation_summary(selection_config))
+  
+  print(f"\nTo process ALL ND2 files, either:")
+  print(f"  1. Set 'count: null' in your config.yaml")
+  print(f"  2. Remove the 'count' setting entirely")
+  print(f"\nTo continue with the current limit of {count_setting} files, type 'y' and press Enter.")
+  print("To cancel and modify your settings, press any other key and Enter.")
+  
+  # Get user confirmation
+  try:
+    user_input = input("\nContinue with limited processing? (y/N): ").strip().lower()
+    if user_input != 'y':
+      print("\n❌ Processing cancelled. Please modify your nd2_selection_settings in config.yaml")
+      print("   Set 'count: null' to process all ND2 files.")
+      exit(1)
+    else:
+      print(f"\n✅ Continuing with analysis of {count_setting} ND2 files...\n")
+  except KeyboardInterrupt:
+    print("\n\n❌ Processing cancelled by user.")
+    exit(1)
+
+
+def main(return_images=False, skip_validation=False):
   # Get input source configuration
   input_source = config.get("input_source")
+  
+  # Check if running directly with count limitation for ND2 files
+  # Skip validation if explicitly requested (for programmatic calls) or when returning images
+  if not skip_validation and not return_images:
+    _check_direct_execution_with_count_limit(input_source)
   
   # Input-specific preparation - only loads/prepares raw images and metadata
   if input_source == "nd2":
@@ -57,11 +114,15 @@ def main():
     raise ValueError(f"Invalid input_source '{input_source}'. Must be 'nd2' or 'bbbc022'.")
   
   # Single common pipeline - same preprocessing, segmentation, and analysis for both sources
-  run_unified_pipeline(raw_images, image_names, metadata, output_dir)
+  result = run_unified_pipeline(raw_images, image_names, metadata, output_dir, input_source, return_images=return_images)
+  
+  if return_images:
+    return result
+  return None
 
 
 def prepare_nd2_inputs():
-  """Load and prepare ND2 files - returns raw collapsed images only"""
+  """Load and prepare ND2 files with optional selection filtering - returns raw collapsed images only"""
   nd2_folder_path = config.get("raw_nd2_path")
 
   if nd2_folder_path is None:
@@ -70,10 +131,25 @@ def prepare_nd2_inputs():
   if not os.path.exists(nd2_folder_path):
     raise ValueError(f"ND2 folder not found: {nd2_folder_path}")
 
-  print(f"Processing ND2 folder: {nd2_folder_path}")
-  nd2_objects = get_nd2_objects(nd2_folder_path)
+  # Get and validate ND2 selection settings
+  selection_config = config.get("nd2_selection_settings")
+  validator = ND2SelectionValidator()
+  is_valid, errors = validator.validate_selection_config(selection_config)
   
-  print(f"Collapsing z-axis for {len(nd2_objects)} ND2 files")
+  if not is_valid:
+    print("❌ ND2 selection configuration errors:")
+    for error in errors:
+      print(f"  - {error}")
+    raise ValueError("Invalid ND2 selection configuration. Please check your config.yaml file.")
+  
+  # Print validation summary
+  print(validator.get_validation_summary(selection_config))
+  print(f"Processing ND2 folder: {nd2_folder_path}")
+  
+  # Load ND2 objects with selection filtering
+  nd2_objects = get_nd2_objects(nd2_folder_path, selection_config)
+  
+  print(f"Collapsing z-axis for {len(nd2_objects)} selected ND2 files")
   collapsed_images = batch_collapse_z_axis(nd2_objects, method=config.get("z_collapse_method", "mean"))
   
   # Extract image names for ND2 files - metadata will be extracted from filenames
@@ -173,7 +249,7 @@ def prepare_bbbc022_inputs():
   return converted_images, image_names, enhanced_metadata
 
 
-def run_unified_pipeline(raw_images, image_names, metadata, output_dir):
+def run_unified_pipeline(raw_images, image_names, metadata, output_dir, input_source, return_images=False):
   """Single unified pipeline for preprocessing, segmentation, and analysis"""
   print("\n" + "="*60)
   print("RUNNING UNIFIED PROCESSING PIPELINE")
@@ -287,13 +363,40 @@ def run_unified_pipeline(raw_images, image_names, metadata, output_dir):
   
   # === DETERMINE FINAL IMAGES ===
   # Determine which images to use for analysis (final preprocessed images)
-  final_images = per_nucleus_preprocessed if per_nucleus_preprocessed else global_preprocessed
+  # This logic is now handled inside the analysis pipeline
+  
+  # === RETURN IMAGES IF REQUESTED ===
+  if return_images:
+    # Determine final images for analysis and visualization
+    if preprocessing_config.get("per_nucleus_normalization"):
+      final_images_for_analysis = per_nucleus_preprocessed
+    else:
+      final_images_for_analysis = global_preprocessed
+
+    return {
+      'raw_images': raw_images,
+      'global_preprocessed': global_preprocessed,
+      'per_nucleus_preprocessed': per_nucleus_preprocessed,
+      'final_images': final_images_for_analysis,
+      'masks': masks,
+      'image_names': image_names,
+      'metadata': metadata,
+      'channel_index': channel_index
+    }
   
   # === ANALYSIS PIPELINE ===
-  run_common_analysis_pipeline(final_images, masks, image_names, metadata, output_dir)
+  run_common_analysis_pipeline(
+      global_preprocessed_images=global_preprocessed,
+      per_nucleus_preprocessed_images=per_nucleus_preprocessed,
+      masks=masks,
+      image_names=image_names,
+      metadata=metadata,
+      output_dir=output_dir,
+      input_source=input_source
+  )
 
 
-def run_common_analysis_pipeline(final_images, masks, image_names, metadata, output_dir):
+def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preprocessed_images, masks, image_names, metadata, output_dir, input_source):
   """Run the analysis pipeline - same for both ND2 and BBBC022"""
   print("\n" + "="*60)
   print("RUNNING DNA CONDENSATION ANALYSIS")
@@ -306,7 +409,7 @@ def run_common_analysis_pipeline(final_images, masks, image_names, metadata, out
   
   # Create unique timestamped subfolder for this analysis run
   ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-  run_output = root_output / ts
+  run_output = root_output / f"{input_source}_{ts}"
   run_output.mkdir(parents=True, exist_ok=True)
   
   # Archive current configuration for reproducibility
@@ -337,7 +440,10 @@ def run_common_analysis_pipeline(final_images, masks, image_names, metadata, out
       # ND2 case: Use original metadata extraction from filenames
       print("Using filename-based metadata extraction for ND2 files")
       analysis_results = run_analysis_from_batch_processor(
-        final_images, masks, image_names, 
+        global_preprocessed_images=global_preprocessed_images,
+        per_nucleus_preprocessed_images=per_nucleus_preprocessed_images,
+        masks=masks,
+        image_names=image_names,
         output_dir=str(run_output),
         use_image_aggregation=use_image_aggregation,
         config=config._config
@@ -375,7 +481,10 @@ def run_common_analysis_pipeline(final_images, masks, image_names, metadata, out
         _ap.extract_experimental_metadata = _patched_extract
 
       analysis_results = run_analysis_from_batch_processor(
-        final_images, masks, image_names, 
+        global_preprocessed_images=global_preprocessed_images,
+        per_nucleus_preprocessed_images=per_nucleus_preprocessed_images,
+        masks=masks,
+        image_names=image_names,
         output_dir=str(run_output),
         use_image_aggregation=use_image_aggregation,
         config=config._config
@@ -456,6 +565,16 @@ def run_common_analysis_pipeline(final_images, masks, image_names, metadata, out
           print(f"\n📊 Creating standalone plot(s) for {len(metrics_to_plot)} metric(s)...")
           
           # Use the same aggregation setting as statistical analysis for consistency
+          use_image_aggregation_plots = config.get("analysis_settings", {}).get("use_image_aggregation", True)
+
+          # Check for sufficient data for image-level aggregation ONCE before the loop
+          if use_image_aggregation_plots:
+              group_image_counts = features_df.groupby('condition')['image_name'].nunique()
+              if not (group_image_counts >= 2).all():
+                  print(f"\nInfo: Insufficient images per group for image-level statistical plots. Images per group: {group_image_counts.to_dict()}")
+                  print("      Falling back to per-nucleus plotting for all single metric visualizations.")
+                  warnings.warn("Using per-nucleus data for plotting (potential pseudoreplication)")
+                  use_image_aggregation_plots = False # Fallback for this plotting section
           
           for metric_to_plot in metrics_to_plot:
             try:
@@ -465,7 +584,7 @@ def run_common_analysis_pipeline(final_images, masks, image_names, metadata, out
                 metric=metric_to_plot,
                 group_column='condition',
                 save_path=save_path,
-                use_image_aggregation=use_image_aggregation
+                use_image_aggregation=use_image_aggregation_plots
               )
               print(f"✓ Saved: {save_path}")
             except Exception as e:
@@ -484,12 +603,15 @@ def run_common_analysis_pipeline(final_images, masks, image_names, metadata, out
         import pandas as pd
         from dna_condensation.visualization.visualize_nuclei import create_nuclei_panel
         
+        # Determine which images to use for the panel
+        panel_images = per_nucleus_preprocessed_images if per_nucleus_preprocessed_images else global_preprocessed_images
+
         features_df = pd.read_csv(run_output / "all_features.csv")
         out_dir = run_output
         out_path = out_dir / nuclei_cfg.get("save_name", "nuclei_panel.png")
         
         create_nuclei_panel(
-          images=final_images,
+          images=panel_images,
           masks=masks,
           image_names=image_names,
           features_df=features_df,

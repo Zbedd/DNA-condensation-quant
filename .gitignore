@@ -221,3 +221,6 @@ temp/
 
 # Development and debug scripts
 dev_scripts/
+
+# Test files and test outputs
+tests/

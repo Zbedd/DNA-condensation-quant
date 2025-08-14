@@ -60,39 +60,63 @@ class DNACondensationAnalysisPipeline:
         self.pca_results = None
         
     def run_full_analysis(self, 
-                         images: List[np.ndarray],
+                         global_preprocessed_images: List[np.ndarray],
+                         per_nucleus_preprocessed_images: Optional[List[np.ndarray]],
                          masks: List[np.ndarray], 
                          image_names: List[str],
                          group_column: str = 'condition') -> Dict:
         """
-        Run the complete analysis pipeline.
+        Run the complete analysis pipeline using a dual-data approach.
         
         Parameters:
         -----------
-        images : List[np.ndarray]
-            List of preprocessed intensity images
+        global_preprocessed_images : List[np.ndarray]
+            List of globally preprocessed images for intensity-based features.
+        per_nucleus_preprocessed_images : List[np.ndarray], optional
+            List of per-nucleus normalized images for texture-based features.
         masks : List[np.ndarray]
-            List of segmentation masks (labeled)
+            List of segmentation masks (labeled).
         image_names : List[str]
-            Names/identifiers for each image
+            Names/identifiers for each image.
         group_column : str
-            Column to use for statistical grouping
+            Column to use for statistical grouping.
             
         Returns:
         --------
         Dict
-            Dictionary containing all analysis results
+            Dictionary containing all analysis results.
         """
         print("=" * 60)
         print("DNA CONDENSATION ANALYSIS PIPELINE")
         print("=" * 60)
         
-        # Step 1: Feature extraction
+        # Step 1: Feature Extraction (Dual Pipeline)
         print("\n1. FEATURE EXTRACTION")
         print("-" * 30)
-        self.features_df = self.feature_extractor.extract_features_batch(
-            images, masks, image_names
+        
+        # Extract intensity and morphological features from globally preprocessed images
+        print("Extracting intensity and morphological features...")
+        intensity_features_df = self.feature_extractor.extract_features_batch(
+            global_preprocessed_images, masks, image_names, feature_types=['intensity', 'morphology', 'spatial', 'granulometry']
         )
+        
+        # Extract texture features from per-nucleus normalized images, if available
+        if per_nucleus_preprocessed_images:
+            print("Extracting texture features from per-nucleus normalized images...")
+            texture_features_df = self.feature_extractor.extract_features_batch(
+                per_nucleus_preprocessed_images, masks, image_names, feature_types=['texture']
+            )
+            # Merge features, keeping only the texture columns from the second extraction
+            texture_cols = [col for col in texture_features_df.columns if 'glcm' in col]
+            self.features_df = pd.merge(
+                intensity_features_df,
+                texture_features_df[['image_name', 'nucleus_id'] + texture_cols],
+                on=['image_name', 'nucleus_id']
+            )
+        else:
+            print("No per-nucleus normalized images provided; texture features will be based on globally preprocessed data.")
+            self.features_df = intensity_features_df
+
         print(f"Extracted features for {len(self.features_df)} nuclei")
         
         # Step 2: Add experimental metadata
@@ -390,7 +414,8 @@ class DNACondensationAnalysisPipeline:
         return "\n".join(interpretation)
 
 
-def run_analysis_from_batch_processor(images: List[np.ndarray],
+def run_analysis_from_batch_processor(global_preprocessed_images: List[np.ndarray],
+                                    per_nucleus_preprocessed_images: Optional[List[np.ndarray]],
                                     masks: List[np.ndarray],
                                     image_names: List[str],
                                     output_dir: str = "dna_condensation_analysis",
@@ -401,29 +426,36 @@ def run_analysis_from_batch_processor(images: List[np.ndarray],
     
     Parameters:
     -----------
-    images : List[np.ndarray]
-        Preprocessed images from batch processor
+    global_preprocessed_images : List[np.ndarray]
+        Globally preprocessed images for intensity features.
+    per_nucleus_preprocessed_images : List[np.ndarray], optional
+        Per-nucleus normalized images for texture features.
     masks : List[np.ndarray] 
-        Segmentation masks from batch processor
+        Segmentation masks from batch processor.
     image_names : List[str]
-        Image names from batch processor
+        Image names from batch processor.
     output_dir : str
-        Output directory for results
+        Output directory for results.
     use_image_aggregation : bool
-        If True, use image-level aggregation for statistical tests to avoid pseudoreplication
+        If True, use image-level aggregation for statistical tests to avoid pseudoreplication.
     config : dict, optional
-        Configuration dictionary for feature extraction parameters
+        Configuration dictionary for feature extraction parameters.
         
     Returns:
     --------
     Dict
-        Complete analysis results
+        Complete analysis results.
     """
     # Initialize pipeline with aggregation setting and config
     pipeline = DNACondensationAnalysisPipeline(output_dir, use_image_aggregation=use_image_aggregation, config=config)
     
-    # Run full analysis
-    results = pipeline.run_full_analysis(images, masks, image_names)
+    # Run full analysis with the dual-pipeline data
+    results = pipeline.run_full_analysis(
+        global_preprocessed_images=global_preprocessed_images,
+        per_nucleus_preprocessed_images=per_nucleus_preprocessed_images,
+        masks=masks,
+        image_names=image_names
+    )
     
     # Generate biological interpretation
     biological_interpretation = pipeline.get_biological_interpretation()

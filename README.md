@@ -104,6 +104,35 @@ features_df = pipeline.analyze_nd2_file(
 5. **Feature Extraction**: Comprehensive measurement across multiple domains
 6. **Statistical Analysis**: Group comparisons with multiple testing correction
 
+## Metrics Tracked
+
+This pipeline extracts a comprehensive set of features to quantify nuclear changes. The metrics are grouped into categories based on their scientific purpose and their relationship with intensity normalization.
+
+### Intensity-Based Metrics
+These metrics directly measure the amount and distribution of the fluorescence signal. They are sensitive to absolute intensity levels and should be calculated on data that has **not** undergone per-nucleus normalization to allow for valid comparisons between different cells and experimental groups.
+
+- **Statistical Measures**: `mean_intensity`, `std_intensity`, `coefficient_of_variation`, `min_intensity`, `max_intensity`, `intensity_range`
+- **Distribution Shape**: `intensity_skewness`, `intensity_kurtosis`, `intensity_entropy`
+- **Percentile-Based**: `intensity_p{10, 25, 50, 75, 90, 95, 99}`, `high_intensity_fraction`
+- **Derived Intensity**: `nuclear_density`
+- **Spatial Intensity**: `radial_shell_{0...N-1}`, `center_to_edge_ratio`
+- **Granulometry**: `granulometry_spots_r{radius}`, `granulometry_area_r{radius}`, `granulometry_area_fraction_r{radius}`
+
+### Texture-Based Metrics
+These metrics quantify the spatial arrangement and patterns of pixels within a nucleus, providing insight into chromatin texture (e.g., smooth, coarse, clumped). To ensure that these comparisons are not confounded by absolute brightness, these features are best calculated on data that **has** been subjected to per-nucleus intensity normalization.
+
+- **GLCM Contrast**: `glcm_contrast_mean`, `glcm_contrast_std`
+- **GLCM Dissimilarity**: `glcm_dissimilarity_mean`, `glcm_dissimilarity_std`
+- **GLCM Homogeneity**: `glcm_homogeneity_mean`, `glcm_homogeneity_std`
+- **GLCM Energy (Uniformity)**: `glcm_energy_mean`, `glcm_energy_std`
+- **GLCM Correlation**: `glcm_correlation_mean`, `glcm_correlation_std`
+
+### Morphological Metrics
+These metrics describe the size and shape of the nucleus. They are derived from the segmentation mask and are independent of pixel intensity.
+
+- **Size**: `area`, `perimeter`, `major_axis_length`, `minor_axis_length`, `equivalent_diameter`
+- **Shape**: `eccentricity`, `solidity`, `extent`, `aspect_ratio`, `circularity`, `orientation`
+
 ### Feature Categories
 
 **Morphological Features:**

@@ -565,16 +565,17 @@ class StatisticalVisualizer:
             if len(groups_image) >= 2 and (n_images_per_group >= 2).all():
                 use_image_level = True
                 groups = groups_image
-                print(f"Using image-level testing (n_images per group: {dict(n_images_per_group)})")
+                # Image-level testing will be used silently
             else:
-                print(f"Insufficient images per group for image-level testing. Images per group: {dict(n_images_per_group)}")
-                print("Falling back to per-nucleus testing")
+                # Insufficient images for image-level testing - fallback silently
+                # Warning is now issued once in batch_processor.py to avoid repetition
+                pass
 
         if not use_image_level:
             # Use per-nucleus testing
             groups = sorted(plot_data[group_column].unique())
             if use_image_aggregation:
-                print(f"Warning: Using per-nucleus testing (potential pseudoreplication)")
+                print(f"Warning: Using per-nucleus testing (potential pseudoreplication), likely because <2 samples in")
             else:
                 print(f"Using per-nucleus testing (as requested via use_image_aggregation=False)")
 

@@ -11,19 +11,23 @@ from typing import List, Optional, Tuple, Dict, Any
 from nd2reader import ND2Reader
 from pathlib import Path
 from dna_condensation.pipeline.config import config
+from dna_condensation.core.file_selector import ND2FileSelector
 
 # Define global cache directory outside of Git tracking
 BBBC022_CACHE_DIR = project_root / ".bbbc022_cache"
 
-def get_nd2_objects(path: Optional[str] = None) -> List[ND2Reader]:
+def get_nd2_objects(path: Optional[str] = None, selection_config: Optional[Dict[str, Any]] = None) -> List[ND2Reader]:
     """
-    Return a list of ND2Reader objects for all .nd2 files in the specified path.
+    Return a list of ND2Reader objects for all .nd2 files in the specified path,
+    with optional file selection and filtering.
     
     Args:
         path: Directory path containing .nd2 files. If None, uses config raw_nd2_path.
+        selection_config: Optional configuration for file selection and filtering.
+                         If None, uses config nd2_selection_settings or no filtering.
         
     Returns:
-        List of ND2Reader objects for each .nd2 file found.
+        List of ND2Reader objects for each selected .nd2 file.
         
     Raises:
         FileNotFoundError: If the path doesn't exist.
@@ -49,7 +53,26 @@ def get_nd2_objects(path: Optional[str] = None) -> List[ND2Reader]:
     if not nd2_files:
         raise ValueError(f"No .nd2 files found in: {nd2_path}")
     
-    # Create ND2Reader objects for each file
+    print(f"Found {len(nd2_files)} ND2 files in directory")
+    
+    # Apply file selection if configured
+    if selection_config is None:
+        # Use selection config from main config if available
+        selection_config = config.get('nd2_selection_settings')
+    
+    if selection_config:
+        # Apply file selection
+        file_selector = ND2FileSelector(selection_config)
+        selected_files = file_selector.select_files(nd2_files)
+        
+        # Print selection summary
+        print(file_selector.get_selection_summary(nd2_files, selected_files))
+        
+        nd2_files = selected_files
+    else:
+        print("No file selection applied - using all available files")
+    
+    # Create ND2Reader objects for each selected file
     nd2_objects = []
     for nd2_file in nd2_files:
         try:
@@ -62,7 +85,7 @@ def get_nd2_objects(path: Optional[str] = None) -> List[ND2Reader]:
     if not nd2_objects:
         raise ValueError("No valid .nd2 files could be loaded")
     
-    print(f"Successfully loaded {len(nd2_objects)} ND2 files")
+    print(f"Successfully loaded {len(nd2_objects)} ND2 files for processing")
     return nd2_objects
 
 
