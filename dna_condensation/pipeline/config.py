@@ -12,24 +12,42 @@ except ImportError:
 
 
 class Config:
-    """Simple configuration class that loads from config.yaml."""
+    """
+    Configuration class that loads from config.yaml and supports dev overrides.
+    If `dev_mode: true` is in config.yaml, it merges settings from dev_config.yaml.
+    """
     
     def __init__(self, config_file: Optional[str] = None):
-        """Initialize configuration from config.yaml file."""
+        """Initialize configuration from YAML files."""
         if config_file is None:
-            config_file = Path(__file__).parent / 'config.yaml'
+            self.config_path = Path(__file__).parent / 'config.yaml'
+        else:
+            self.config_path = Path(config_file)
+            
+        self.dev_config_path = self.config_path.parent / 'dev_config.yaml'
         
-        self._config = self._load_config(config_file)
+        # Load base configuration
+        self._config = self._load_config_file(self.config_path)
+        
+        # Check for dev mode and apply overrides
+        if self.get('dev_mode', False):
+            print("DEV MODE: Attempting to load dev_config.yaml...")
+            try:
+                dev_config = self._load_config_file(self.dev_config_path)
+                self._config.update(dev_config)
+                print("✅ DEV MODE: Successfully loaded and applied settings from dev_config.yaml.")
+            except FileNotFoundError:
+                print("⚠️ DEV MODE: dev_mode is true, but dev_config.yaml was not found.")
     
-    def _load_config(self, config_file: Path) -> Dict[str, Any]:
-        """Load configuration from YAML file."""
-        if not config_file.exists():
-            raise FileNotFoundError(f"Config file not found: {config_file}")
+    def _load_config_file(self, file_path: Path) -> Dict[str, Any]:
+        """Load configuration from a single YAML file."""
+        if not file_path.exists():
+            raise FileNotFoundError(f"Config file not found: {file_path}")
         
         if yaml is None:
             raise ImportError("PyYAML is required. Install with: pip install pyyaml")
         
-        with open(config_file, 'r') as f:
+        with open(file_path, 'r') as f:
             config_data = yaml.safe_load(f) or {}
         
         return config_data

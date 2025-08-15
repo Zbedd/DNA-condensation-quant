@@ -1,6 +1,9 @@
 # DNA Condensation Quantification Configuration
 # Edit the values below for your specific analysis
 
+## DEVELOPMENT SETTINGS
+dev_mode: false                 # If true, settings from dev_config.yaml will override these settings
+
 # ==== FILE PATHS ====
 # ==== INPUT SOURCE CONFIGURATION ====
 input_source: "nd2"        # Options: "nd2" or "bbbc022"
