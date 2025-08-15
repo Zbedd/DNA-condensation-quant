@@ -224,3 +224,6 @@ dev_scripts/
 
 # Test files and test outputs
 tests/
+
+# Validation directory
+dna_condensation/validation/

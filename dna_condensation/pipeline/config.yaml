@@ -90,13 +90,18 @@ feature_extraction:
 # Preprocessing options for homogeneity analysis
 preprocessing:
   background_correction: true   # Apply rolling ball background correction (RECOMMENDED)
-  deconvolution: false         # Apply Richardson-Lucy deconvolution (optional, slower)
-  intensity_normalization: true # Apply global intensity normalization (recommended for batch comparison)
-  per_nucleus_normalization: true  # Apply per-nucleus normalization for homogeneity analysis
-  # Advanced parameters
   bg_ball_radius: 75           # Rolling ball radius (adjust based on nucleus size)
+                                 # Should always be set to be slightly larger than the
+                                 # largest nucleus in your images to ensure that only the
+                                 # true, large-scale background variations are removed.
+
+  deconvolution: false         # Apply Richardson-Lucy deconvolution (optional, slower, disabled because it may interfere with analysis)
   deconv_iterations: 10        # Deconvolution iterations
+
+  intensity_normalization: true # Apply global intensity normalization (recommended for batch comparison)
   norm_method: "percentile"    # Normalization method: percentile, zscore, minmax, target_mean
+
+  per_nucleus_normalization: true  # Apply per-nucleus normalization for homogeneity analysis
 
 # Z-axis collapse method
 z_collapse_method: "mean"       # Options: "max", "mean", "sum", "median"

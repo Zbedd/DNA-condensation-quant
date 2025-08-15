@@ -17,7 +17,7 @@ from dna_condensation.core.config_validator import ND2SelectionValidator
 from dna_condensation.core.z_stack_handling import batch_collapse_z_axis
 from dna_condensation.core.preprocessor import bulk_preprocess_images, per_nucleus_intensity_normalization
 from dna_condensation.core.segmentation import bulk_segment_images
-from dna_condensation.visualization.plotting import plot_image, plot_multiple, plot_image_mask, plot_preprocessing_comparison
+from dna_condensation.core.plotting import plot_image, plot_multiple, plot_image_mask, plot_preprocessing_comparison
 from dna_condensation.analysis.analysis_pipeline import run_analysis_from_batch_processor
 
 # Initialize config
