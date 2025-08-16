@@ -13,8 +13,8 @@ bbbc022_settings:
 
 # 2. Disable computationally expensive preprocessing steps.
 preprocessing:
-  background_correction: true   # Apply rolling ball background correction (RECOMMENDED)
-  bg_ball_radius: 15           # Smaller values will run faster, but nuclear detail will be lost.
+  background_correction: false   # Apply rolling ball background correction (RECOMMENDED)
+  bg_ball_radius: 150           # Smaller values will run faster, but nuclear detail will be lost.
 
   deconvolution: false         # Apply Richardson-Lucy deconvolution (optional, slower, disabled because it may interfere with analysis)
   deconv_iterations: 10        # Deconvolution iterations
@@ -25,7 +25,7 @@ preprocessing:
   per_nucleus_normalization: true  # Apply per-nucleus normalization for homogeneity analysis
 
 # 3. Use the fastest available segmentation method.
-segmentation_method: "otsu" # Otsu is much faster than watershed or other complex methods.
+segmentation_method: "stardist" # Otsu is much faster than watershed or other complex methods.
 
 # 4. Disable all plotting to prevent blocking execution for visualization.
 plot:

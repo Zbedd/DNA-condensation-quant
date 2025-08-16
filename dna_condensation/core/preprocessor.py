@@ -194,9 +194,6 @@ def background_correction(image: np.ndarray, channel_index: int, ball_radius: in
         # Note: rolling_ball expects float input, returns float output
         processed_float = processed_image.astype(np.float64)
         
-        # Create rolling ball structuring element
-        ball = disk(ball_radius)
-        
         # Estimate background using rolling ball
         background = rolling_ball(processed_float, radius=ball_radius)
         

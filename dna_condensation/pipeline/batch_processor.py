@@ -11,7 +11,7 @@ import shutil
 import numpy as np
 import warnings
 from datetime import datetime
-from dna_condensation.pipeline.config import Config
+from dna_condensation.pipeline.config import config
 from dna_condensation.core.image_loader import get_nd2_objects
 from dna_condensation.core.config_validator import ND2SelectionValidator
 from dna_condensation.core.z_stack_handling import batch_collapse_z_axis
@@ -20,8 +20,7 @@ from dna_condensation.core.segmentation import bulk_segment_images
 from dna_condensation.core.plotting import plot_image, plot_multiple, plot_image_mask, plot_preprocessing_comparison
 from dna_condensation.analysis.analysis_pipeline import run_analysis_from_batch_processor
 
-# Initialize config
-config = Config()
+# Use shared config from pipeline.config (single source of truth)
 
 '''
 Sample ND2 File Analysis: 48hr_dk16_wtLSD1_well1_20x001.nd2
@@ -131,7 +130,7 @@ def prepare_nd2_inputs():
   if not os.path.exists(nd2_folder_path):
     raise ValueError(f"ND2 folder not found: {nd2_folder_path}")
 
-  # Get and validate ND2 selection settings
+  # Get and validate ND2 selection settings (avoid duplicate printing; loader will print summary)
   selection_config = config.get("nd2_selection_settings")
   validator = ND2SelectionValidator()
   is_valid, errors = validator.validate_selection_config(selection_config)
@@ -141,12 +140,9 @@ def prepare_nd2_inputs():
     for error in errors:
       print(f"  - {error}")
     raise ValueError("Invalid ND2 selection configuration. Please check your config.yaml file.")
-  
-  # Print validation summary
-  print(validator.get_validation_summary(selection_config))
   print(f"Processing ND2 folder: {nd2_folder_path}")
   
-  # Load ND2 objects with selection filtering
+  # Load ND2 objects with selection filtering (also returns the selector used)
   nd2_objects = get_nd2_objects(nd2_folder_path, selection_config)
   
   print(f"Collapsing z-axis for {len(nd2_objects)} selected ND2 files")
@@ -182,23 +178,35 @@ def prepare_bbbc022_inputs():
     output_dir=str(validation_output_path / "bbbc022_data")
   )
   
-  print(f"✓ Loaded {len(raw_images)} BBBC022 images")
-  
-  # Convert to uint8 if needed (BBBC022 images come as float32)
-  converted_images = []
+  # Ensure dtype is uint8 for downstream preprocessing/segmentation
+  raw_converted = []
   for i, img in enumerate(raw_images):
-    if img.dtype != np.uint8:
-      if img.dtype == np.float32:
-        # Check the range and convert appropriately
-        if img.max() <= 1.0:
-          img_uint8 = np.clip(img * 255, 0, 255).astype(np.uint8)
-        else:
-          img_uint8 = np.clip(img, 0, 255).astype(np.uint8)
-      else:
-        img_uint8 = np.clip(img, 0, 255).astype(np.uint8)
-      converted_images.append(img_uint8)
+    if img is None:
+      raw_converted.append(None)
+      continue
+    if img.dtype == np.uint8:
+      raw_converted.append(img)
     else:
-      converted_images.append(img)
+      # Robust float handling assuming 0-255 range from loader
+      if np.issubdtype(img.dtype, np.floating):
+        raw_converted.append(np.clip(img, 0, 255).astype(np.uint8))
+      elif img.dtype == np.uint16:
+        # Scale down to 8-bit preserving dynamic range
+        # Use simple right shift if full 16-bit, else min-max normalize
+        maxv = img.max()
+        minv = img.min()
+        if maxv > 255 and (maxv - minv) > 0:
+          scaled = (img.astype(np.float32) - minv) * (255.0 / (maxv - minv))
+          raw_converted.append(np.clip(scaled, 0, 255).astype(np.uint8))
+        else:
+          raw_converted.append(np.clip(img, 0, 255).astype(np.uint8))
+      else:
+        raw_converted.append(img.astype(np.uint8))
+  
+  raw_images = raw_converted
+  print(f"BBBC022 images converted to dtype uint8 for segmentation")
+  
+  print(f"✓ Loaded {len(raw_images)} BBBC022 images")
   
   # Add experimental metadata (control vs treatment groups)
   # Use the grouping configuration from bbbc022_settings
@@ -246,7 +254,7 @@ def prepare_bbbc022_inputs():
   
   image_names = [meta['image_name'] for meta in enhanced_metadata]
   
-  return converted_images, image_names, enhanced_metadata
+  return raw_images, image_names, enhanced_metadata
 
 
 def run_unified_pipeline(raw_images, image_names, metadata, output_dir, input_source, return_images=False):

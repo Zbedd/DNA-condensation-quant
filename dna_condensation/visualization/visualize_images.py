@@ -27,7 +27,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from dna_condensation.pipeline.batch_processor import main as run_batch_processor
-from dna_condensation.pipeline.config import Config
+from dna_condensation.pipeline.config import config as shared_config, Config
 from dna_condensation.core.config_validator import ND2SelectionValidator
 
 
@@ -43,7 +43,11 @@ class ImageVisualizer:
             selection_override: Override for nd2_selection_settings (optional)
                               Useful for visualization-specific selection (e.g., limiting count for display)
         """
-        self.config = Config(config_file) if config_file else Config()
+        # Prefer shared config to avoid multiple dev-mode prints; allow override file if provided
+        if config_file:
+            self.config = Config(config_file)
+        else:
+            self.config = shared_config
         
         # Get visualization settings from config
         viz_config = self.config.get("image_visualization", {})
@@ -143,7 +147,6 @@ class ImageVisualizer:
                 raise RuntimeError("Failed to get images from batch processor")
                 
             return result
-            
         finally:
             # Restore original config
             if original_selection_config is not None:

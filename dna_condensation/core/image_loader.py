@@ -197,95 +197,24 @@ def load_bbbc022_images(
     print(f"Wells: {wells if wells else 'All available'}")
     
     try:
-        if use_cache and cache_available:
-            # Check if processed cache is available (faster than re-processing)
-            processed_dir = cache_dir / "processed"
-            metadata_file = cache_dir / "metadata.json"
-            
-            if processed_dir.exists() and metadata_file.exists():
-                # Load from processed cache
-                import json
-                with open(metadata_file, 'r') as f:
-                    cached_metadata = json.load(f)
-                
-                if len(cached_metadata) >= count:
-                    print(f"✓ Loading from processed cache ({len(cached_metadata)} images available)")
-                    
-                    # Load the requested number of images
-                    selected_metadata = cached_metadata[:count] if count <= len(cached_metadata) else cached_metadata
-                    
-                    cached_images = []
-                    for meta in selected_metadata:
-                        processed_path = meta.get('processed_path')
-                        if processed_path and Path(processed_path).exists():
-                            img = np.load(processed_path)
-                            cached_images.append(img)
-                        else:
-                            # Fallback to original processing if processed file missing
-                            print(f"Warning: Missing processed file {processed_path}, falling back to full processing")
-                            break
-                    
-                    if len(cached_images) == len(selected_metadata):
-                        # Successfully loaded all from cache
-                        print(f"✓ Loaded {len(cached_images)} images from cache in <1 second")
-                        images = cached_images
-                        metadata = selected_metadata
-                    else:
-                        # Fall through to full processing
-                        print("Cache incomplete, falling back to full processing...")
-                        images, metadata = fetch_bbbc022_samples(
-                            count=count,
-                            channels=channels,
-                            wells=wells,
-                            nuclei_only=nuclei_only,
-                            seed=seed,
-                            output_dir=output_dir,
-                            max_plates=max_plates
-                        )
-                else:
-                    print(f"Cache has {len(cached_metadata)} images, need {count} - processing more...")
-                    images, metadata = fetch_bbbc022_samples(
-                        count=count,
-                        channels=channels,
-                        wells=wells,
-                        nuclei_only=nuclei_only,
-                        seed=seed,
-                        output_dir=output_dir,
-                        max_plates=max_plates
-                    )
-            else:
-                print("No processed cache found, using zip files...")
-                images, metadata = fetch_bbbc022_samples(
-                    count=count,
-                    channels=channels,
-                    wells=wells,
-                    nuclei_only=nuclei_only,
-                    seed=seed,
-                    output_dir=output_dir,
-                    max_plates=max_plates
-                )
-        else:
-            # Download fresh data or use specified directory
-            if cache_available:
-                print("Cache ignored - downloading fresh data...")
-            else:
-                print("Downloading BBBC022 data...")
-            images, metadata = fetch_bbbc022_samples(
-                count=count,
-                channels=channels,
-                wells=wells,
-                nuclei_only=nuclei_only,
-                seed=seed,
-                output_dir=output_dir,
-                max_plates=max_plates
-            )
-        
+        # Delegate caching logic entirely to fetch_bbbc022_samples.
+        # It will use the raw .zip cache if available, or download fresh if not.
+        images, metadata = fetch_bbbc022_samples(
+            count=count,
+            channels=channels,
+            wells=wells,
+            nuclei_only=nuclei_only,
+            seed=seed,
+            output_dir=output_dir,
+            max_plates=max_plates
+        )
+
         if not images:
             raise ValueError(
                 f"No images could be loaded with the specified criteria. "
                 f"Try increasing count or relaxing filters."
             )
-        
+
         # Ensure images are in the expected format for the pipeline
         processed_images = []
         for img in images:
@@ -293,11 +222,11 @@ def load_bbbc022_images(
                 # Convert to float for processing pipeline compatibility
                 img = img.astype(np.float32)
             processed_images.append(img)
-        
+
         print(f"✓ Successfully loaded {len(processed_images)} BBBC022 images")
         print(f"  Image shape: {processed_images[0].shape}")
         print(f"  Data type: {processed_images[0].dtype}")
-        
+
         # Count wells in final dataset for information
         if metadata:
             well_counts = {}
@@ -305,8 +234,8 @@ def load_bbbc022_images(
                 well = meta.get('well', 'Unknown')
                 well_counts[well] = well_counts.get(well, 0) + 1
             print(f"  Well distribution: {dict(sorted(well_counts.items())[:5])}{'...' if len(well_counts) > 5 else ''}")
-        
+
         return processed_images, metadata
-        
+
     except Exception as e:
         raise ValueError(f"Failed to load BBBC022 images: {e}") from e

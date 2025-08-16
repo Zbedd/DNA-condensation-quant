@@ -2,11 +2,11 @@
 # Edit the values below for your specific analysis
 
 ## DEVELOPMENT SETTINGS
-dev_mode: false                 # If true, settings from dev_config.yaml will override these settings
+dev_mode: true                 # If true, settings from dev_config.yaml will override these settings
 
 # ==== FILE PATHS ====
 # ==== INPUT SOURCE CONFIGURATION ====
-input_source: "nd2"        # Options: "nd2" or "bbbc022"
+input_source: "bbbc022"        # Options: "nd2" or "bbbc022"
 
 # ND2 file processing paths
 raw_nd2_path: "G:/My Drive/KatzLab/DNA-condensation-quantification/raw_nd2"  # Path to folder containing ND2 files
@@ -52,7 +52,7 @@ image_channels:
 # Channel selection for nucleus segmentation
 segmentation_channel_index: 0   # index to use for quantification (0 = single channel for BBBC022) 
 # Segmentation method: 'yolo' (AI-based) or 'watershed' (traditional image processing)
-segmentation_method: "otsu"    # Options: "yolo", "watershed", 'otsu'
+segmentation_method: "stardist"    # Options: "yolo", "watershed", 'otsu'
 
 # Size-based filtering (removes small objects relative to median size)
 size_filtering:
@@ -89,11 +89,12 @@ feature_extraction:
 # ==== PROCESSING SETTINGS ====
 # Preprocessing options for homogeneity analysis
 preprocessing:
-  background_correction: true   # Apply rolling ball background correction (RECOMMENDED)
-  bg_ball_radius: 75           # Rolling ball radius (adjust based on nucleus size)
-                                 # Should always be set to be slightly larger than the
-                                 # largest nucleus in your images to ensure that only the
-                                 # true, large-scale background variations are removed.
+  background_correction: false   # Apply rolling ball background correction (RECOMMENDED)
+                                  # Disabled because radius difficult to quantify and is slow
+  bg_ball_radius: 150             # Rolling ball radius (adjust based on nucleus size)
+                                  # Should always be set to be slightly larger than the
+                                  # largest nucleus in your images to ensure that only the
+                                  # true, large-scale background variations are removed.
 
   deconvolution: false         # Apply Richardson-Lucy deconvolution (optional, slower, disabled because it may interfere with analysis)
   deconv_iterations: 10        # Deconvolution iterations

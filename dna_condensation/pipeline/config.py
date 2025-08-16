@@ -34,11 +34,23 @@ class Config:
             print("DEV MODE: Attempting to load dev_config.yaml...")
             try:
                 dev_config = self._load_config_file(self.dev_config_path)
-                self._config.update(dev_config)
+                self._deep_merge(self._config, dev_config)
                 print("✅ DEV MODE: Successfully loaded and applied settings from dev_config.yaml.")
             except FileNotFoundError:
                 print("⚠️ DEV MODE: dev_mode is true, but dev_config.yaml was not found.")
     
+    def _deep_merge(self, source: Dict[str, Any], destination: Dict[str, Any]) -> None:
+        """
+        Recursively merge dictionaries.
+        
+        `destination` is merged into `source`.
+        """
+        for key, value in destination.items():
+            if isinstance(value, dict) and key in source and isinstance(source.get(key), dict):
+                self._deep_merge(source[key], value)
+            else:
+                source[key] = value
+
     def _load_config_file(self, file_path: Path) -> Dict[str, Any]:
         """Load configuration from a single YAML file."""
         if not file_path.exists():
