@@ -4,6 +4,175 @@ from scipy import ndimage
 from skimage.segmentation import watershed
 from skimage.filters import gaussian
 import cv2
+import os
+from pathlib import Path
+
+# Ensure StarDist/Keras use writable, project-local cache BEFORE importing StarDist
+def _setup_stardist_env_on_import():
+    try:
+        from dna_condensation.pipeline.config import config as _cfg
+        cfg_dir = _cfg.get("stardist_model_dir")
+    except Exception:
+        cfg_dir = None
+
+    project_root = Path(__file__).parent.parent.parent
+    models_dir = Path(cfg_dir) if cfg_dir else (project_root / ".stardist_models")
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    os.environ.setdefault("STARDIST_HOME", str(models_dir))
+    keras_home = project_root / ".keras"
+    keras_home.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("KERAS_HOME", str(keras_home))
+
+_setup_stardist_env_on_import()
+
+from stardist.models import StarDist2D
+from csbdeep.utils import normalize
+
+
+def _ensure_stardist_cache_dir():
+    """Ensure StarDist/Keras cache directories are set to a writable, project-local path.
+    Avoids Windows privilege errors when extracting pretrained models under %USERPROFILE%.
+    """
+    try:
+        # Try to read configured model dir if provided
+        from dna_condensation.pipeline.config import config as _cfg
+        cfg_dir = _cfg.get("stardist_model_dir")
+    except Exception:
+        cfg_dir = None
+
+    # Default to a local folder under repo root
+    project_root = Path(__file__).parent.parent.parent
+    default_models = project_root / ".stardist_models"
+    models_dir = Path(cfg_dir) if cfg_dir else default_models
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set environment variables used by StarDist/Keras download utilities
+    os.environ.setdefault("STARDIST_HOME", str(models_dir))
+    # Keras caches under KERAS_HOME/models; point to local .keras to avoid user-profile restrictions
+    keras_home = project_root / ".keras"
+    keras_home.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("KERAS_HOME", str(keras_home))
+
+
+def _load_local_stardist_model() -> "StarDist2D | None":
+    """Try to load a locally available StarDist model.
+    Handles these cases:
+    - Normal layout: <KERAS_HOME>/models/StarDist2D/2D_versatile_fluo
+    - Extracted layout (no rename): <KERAS_HOME>/models/StarDist2D/2D_versatile_fluo_extracted/2D_versatile_fluo
+    - Extracted layout (flat): <KERAS_HOME>/models/StarDist2D/2D_versatile_fluo_extracted
+    Returns a StarDist2D instance or None if not available.
+    """
+    try:
+        project_root = Path(__file__).parent.parent.parent
+        keras_home = Path(os.environ.get("KERAS_HOME", str(project_root / ".keras")))
+        base_dir = keras_home / "models" / "StarDist2D"
+        name = "2D_versatile_fluo"
+        final_dir = base_dir / name
+        extracted_dir = base_dir / f"{name}_extracted"
+
+        # Preferred: normal final dir (must contain config.json)
+        if (final_dir / "config.json").exists():
+            return StarDist2D(None, name=name, basedir=str(base_dir))
+
+        # Fallback: nested extracted dir
+        nested = extracted_dir / name
+        if nested.exists():
+            # Load directly from extracted/nested without copying/renaming
+            return StarDist2D(None, name=name, basedir=str(extracted_dir))
+
+        # Fallback: flat extracted is actually the model dir (name matches)
+        if extracted_dir.exists() and (extracted_dir / "config.json").exists():
+            # basedir is parent, name is directory name
+            return StarDist2D(None, name=extracted_dir.name, basedir=str(extracted_dir.parent))
+
+        # Additional fallback: sometimes extraction happens in the current working directory
+        cwd = Path.cwd()
+        cwd_extracted = cwd / f"{name}_extracted"
+        if (cwd_extracted / name).exists():
+            return StarDist2D(None, name=name, basedir=str(cwd_extracted))
+        if cwd_extracted.exists() and (cwd_extracted / "config.json").exists():
+            return StarDist2D(None, name=cwd_extracted.name, basedir=str(cwd_extracted.parent))
+
+        # Additional fallback: check STARDIST_HOME if set
+        stardist_home = os.environ.get("STARDIST_HOME")
+        if stardist_home:
+            sd_base = Path(stardist_home) / "StarDist2D"
+            sd_final = sd_base / name
+            sd_extracted = sd_base / f"{name}_extracted"
+            if (sd_final / "config.json").exists():
+                return StarDist2D(None, name=name, basedir=str(sd_base))
+            if (sd_extracted / name).exists():
+                return StarDist2D(None, name=name, basedir=str(sd_extracted))
+            if sd_extracted.exists() and (sd_extracted / "config.json").exists():
+                return StarDist2D(None, name=sd_extracted.name, basedir=str(sd_extracted.parent))
+
+        # Last resort: recursively search for any config.json under base_dir that belongs to this model
+        for root in [base_dir, extracted_dir, Path(os.environ.get("STARDIST_HOME", "")) / "StarDist2D"]:
+            try:
+                if root and root.exists():
+                    for cfg in root.rglob("config.json"):
+                        # Heuristically require path to include the model name to avoid picking other models
+                        if name in str(cfg.parent):
+                            model_dir = cfg.parent
+                            return StarDist2D(None, name=model_dir.name, basedir=str(model_dir.parent))
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+# Cache the StarDist model across calls to avoid repeated downloads/loads
+_CACHED_STARDIST_MODEL: "StarDist2D | None" = None
+
+def _get_stardist_model() -> "StarDist2D":
+    global _CACHED_STARDIST_MODEL
+    if _CACHED_STARDIST_MODEL is not None:
+        return _CACHED_STARDIST_MODEL
+
+    _ensure_stardist_cache_dir()
+
+    # Try local first (handles extracted variants)
+    model = _load_local_stardist_model()
+    if model is not None:
+        _CACHED_STARDIST_MODEL = model
+        print("StarDist: loaded local model (no rename needed)")
+        return _CACHED_STARDIST_MODEL
+
+    # Try pretrained (may download). If Windows rename fails, fall back to extracted directory.
+    try:
+        # Change working directory to base_dir so extraction happens there
+        project_root = Path(__file__).parent.parent.parent
+        keras_home = Path(os.environ.get("KERAS_HOME", str(project_root / ".keras")))
+        base_dir = keras_home / "models" / "StarDist2D"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        old_cwd = Path.cwd()
+        try:
+            os.chdir(base_dir)
+            model = StarDist2D.from_pretrained('2D_versatile_fluo')
+        finally:
+            os.chdir(old_cwd)
+        _CACHED_STARDIST_MODEL = model
+        print("StarDist: loaded pretrained model")
+        return _CACHED_STARDIST_MODEL
+    except Exception as dl_e:
+        err_msg = str(dl_e)
+        # Windows-specific rename privilege issue: load directly from extracted dir
+        if ("2D_versatile_fluo_extracted" in err_msg and ("required privilege" in err_msg.lower() or "privilege" in err_msg.lower())):
+            # Opportunistic wait-and-scan in case extraction just finished
+            try:
+                import time
+                for _ in range(5):  # up to ~1s total
+                    model = _load_local_stardist_model()
+                    if model is not None:
+                        _CACHED_STARDIST_MODEL = model
+                        print("StarDist: loaded from extracted directory after rename failure")
+                        return _CACHED_STARDIST_MODEL
+                    time.sleep(0.2)
+            except Exception:
+                pass
+        # Re-raise original error if all else fails
+        raise dl_e
 
 # Check for cupy availability (for potential future GPU optimizations)
 try:
@@ -278,6 +447,98 @@ def segment_image_otsu(image: np.ndarray, channel_index: int, use_gpu: bool = Tr
         else:
             return np.zeros(empty_shape, dtype=np.uint8)
 
+def segment_image_stardist(image: np.ndarray, channel_index: int, use_gpu: bool = True, return_labels: bool = False) -> np.ndarray:
+    """
+    Segment the input image using StarDist with the '2D_versatile_fluo' model.
+    
+    Args:
+        image: Input image as a numpy array (uint8 format expected)
+               Can be 2D grayscale or 3D multi-channel
+        channel_index: Index of the channel to use for segmentation (0-based)
+        use_gpu: Whether to use GPU acceleration if available
+        return_labels: If True, return labeled mask with object IDs; if False, return binary mask
+    
+    Returns:
+        numpy.ndarray: Segmented image mask 
+                      - If return_labels=False: binary mask (uint8, 0/255)
+                      - If return_labels=True: labeled mask (uint16 with nucleus IDs, 0=background)
+    """
+    # Validate input
+    if not isinstance(image, np.ndarray):
+        raise ValueError("Input image must be a numpy array")
+
+    # Extract specific channel for segmentation (StarDist expects 2D)
+    if image.ndim == 3:
+        if channel_index < 0 or channel_index >= image.shape[2]:
+            raise ValueError(f"Channel index {channel_index} is out of range for image with {image.shape[2]} channels")
+        processed_image = image[:, :, channel_index]
+    elif image.ndim == 2:
+        processed_image = image
+        if channel_index != 0:
+            print(f"Warning: channel_index={channel_index} specified for 2D image, using single channel")
+    else:
+        raise ValueError(f"Unsupported image dimensions: {image.ndim}")
+
+    # Ensure float32 and normalize as recommended in StarDist README (percentile normalization)
+    try:
+        img = processed_image.astype(np.float32, copy=False)
+        img = normalize(img, 1, 99.8)
+    except Exception as e:
+        raise RuntimeError(f"Failed to normalize image for StarDist: {e}")
+
+    # Optionally disable GPU for TensorFlow backend if requested
+    if not use_gpu:
+        try:
+            import tensorflow as tf  # type: ignore
+            # Hide all GPUs from TF if any are present
+            _gpus = tf.config.list_physical_devices('GPU')
+            if _gpus:
+                tf.config.set_visible_devices([], 'GPU')
+                print("StarDist/TensorFlow: GPU disabled per use_gpu=False")
+        except Exception:
+            # If TF isn't installed or call fails, proceed on CPU without forcing
+            pass
+
+    # Load or download the StarDist model (cached globally)
+    try:
+        model = _get_stardist_model()
+    except Exception as e:
+        raise RuntimeError(
+            "Failed to load StarDist model '2D_versatile_fluo'. "
+            f"Details: {e}. If this is the first run, ensure internet access to download the pretrained model or place it under {os.environ.get('KERAS_HOME', str(Path(__file__).parent.parent.parent / '.keras'))}/models/StarDist2D."
+        )
+
+    # Heuristic tiling to avoid out-of-memory on large images
+    try:
+        h, w = img.shape
+        if max(h, w) >= 4096:
+            n_tiles = (4, 4)
+        elif max(h, w) >= 2048:
+            n_tiles = (3, 3)
+        elif max(h, w) >= 1024:
+            n_tiles = (2, 2)
+        else:
+            n_tiles = None
+
+        if n_tiles is None:
+            labels, _ = model.predict_instances(img)
+        else:
+            labels, _ = model.predict_instances(img, n_tiles=n_tiles)
+    except Exception as e:
+        print(f"StarDist segmentation failed: {e}")
+        # Return empty mask on failure
+        empty_shape = processed_image.shape
+        if return_labels:
+            return np.zeros(empty_shape, dtype=np.uint16)
+        else:
+            return np.zeros(empty_shape, dtype=np.uint8)
+
+    # Format outputs
+    if return_labels:
+        return labels.astype(np.uint16, copy=False)
+    else:
+        return (labels > 0).astype(np.uint8) * 255
+
 def segment_image(image: np.ndarray, channel_index: int, method: str = 'yolo', use_gpu: bool = True, return_labels: bool = False) -> np.ndarray:
     """
     Segment the input image using the specified method.
@@ -298,8 +559,10 @@ def segment_image(image: np.ndarray, channel_index: int, method: str = 'yolo', u
         return segment_image_watershed(image, channel_index, use_gpu, return_labels)
     elif method.lower() == 'otsu':
         return segment_image_otsu(image, channel_index, use_gpu, return_labels)
+    elif method.lower() == 'stardist':
+        return segment_image_stardist(image, channel_index, use_gpu, return_labels)
     else:
-        raise ValueError(f"Unknown segmentation method: {method}. Choose 'yolo', 'watershed', or 'otsu'")
+        raise ValueError(f"Unknown segmentation method: {method}. Choose 'yolo', 'watershed', 'otsu', or 'stardist'")
 
 def filter_labels_by_size(labels: np.ndarray, min_size_percentage: float = 10.0, verbose: bool = False) -> np.ndarray:
     """

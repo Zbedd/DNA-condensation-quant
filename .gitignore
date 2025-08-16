@@ -227,3 +227,7 @@ tests/
 
 # Validation directory
 dna_condensation/validation/
+
+# ML model caches (StarDist/Keras)
+.keras/
+.stardist_models/
