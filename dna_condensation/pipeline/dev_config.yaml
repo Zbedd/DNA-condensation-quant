@@ -9,7 +9,7 @@ nd2_selection_settings:
   count: 5  # Process less ND2 files to speed up analysis.
 
 bbbc022_settings:
-  count: 5 # Process less ND2 files to speed up analysis.
+  count: 6 # Process less ND2 files to speed up analysis.
 
 # 2. Disable computationally expensive preprocessing steps.
 preprocessing:
@@ -31,4 +31,4 @@ segmentation_method: "stardist" # Otsu is much faster than watershed or other co
 plot:
   plot_segmentation: false
   single_metric_plot:
-    enabled: false
+    enabled: true

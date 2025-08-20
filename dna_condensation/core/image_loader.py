@@ -6,12 +6,16 @@ sys.path.insert(0, str(project_root))
 
 # Imports
 import os
+import io
+import zipfile
 import numpy as np
 from typing import List, Optional, Tuple, Dict, Any
 from nd2reader import ND2Reader
 from pathlib import Path
 from dna_condensation.pipeline.config import config
 from dna_condensation.core.file_selector import ND2FileSelector
+
+# Optional heavy imports inside functions to avoid hard deps at import time
 
 # Define global cache directory outside of Git tracking
 BBBC022_CACHE_DIR = project_root / ".bbbc022_cache"
@@ -91,151 +95,236 @@ def get_nd2_objects(path: Optional[str] = None, selection_config: Optional[Dict[
 
 def load_bbbc022_images(
     count: int = 10,
-    channels: Optional[List[str]] = None,
-    roles: Optional[List[str]] = None,
-    wells: Optional[List[str]] = None,
     seed: Optional[int] = None,
     output_dir: Optional[str] = None,
-    max_plates: int = 2,
     use_cache: bool = True,
-    nuclei_only: bool = True
+    group_mapping: Optional[Dict[str, List[str]]] = None,
 ) -> Tuple[List[np.ndarray], List[Dict[str, Any]]]:
     """
-    Load BBBC022 microscopy images using imageProcessingUtils with intelligent caching.
-    
-    This function leverages the imageProcessingUtils package to download and load
-    BBBC022 images with specified filtering criteria. Downloads are cached outside
-    of Git tracking for efficiency across multiple validation runs.
-    
-    Args:
-        count: Number of images to sample
-        channels: List of channels to include (e.g., ['OrigHoechst'] for DNA, ['OrigTubulin'] for tubulin)
-                 If None, defaults to ['OrigHoechst'] for DNA analysis
-        roles: List of well roles to include ('compound' for treatments, 'mock' for controls)
-               Note: Current imageProcessingUtils implementation doesn't filter by roles directly.
-               Use BBBC022 metadata CSV to map wells to roles after loading.
-        wells: List of specific wells to include (e.g., ['A01', 'A02'])
-               If None, samples from all available wells
-        seed: Random seed for reproducible results
-        output_dir: Directory to cache downloaded images (optional, will use global cache if None)
-        max_plates: Maximum number of plates to sample from
-        use_cache: If True, use persistent cache directory to avoid re-downloading zip files
-        nuclei_only: If True, focus on nuclei segmentation for DNA condensation analysis
-        
-    Returns:
-        Tuple of (images, metadata)
-        - images: List of numpy arrays (H, W) for single channel or (H, W, C) for multiple channels
-        - metadata: List of dictionaries containing image metadata including well information
-        
-    Raises:
-        ImportError: If imageProcessingUtils is not properly installed
-        ValueError: If no images could be loaded with the specified criteria
-        
-    Examples:
-        # Load control (mock) wells with caching
-        control_images, control_metadata = load_bbbc022_images(
-            count=20, 
-            channels=['OrigHoechst'], 
-            wells=['A13', 'A14', 'B13', 'B14']  # Known mock wells
-        )
-        
-        # Load treatment wells with DNA condensation compounds
-        treatment_images, treatment_metadata = load_bbbc022_images(
-            count=20,
-            channels=['OrigHoechst'],
-            wells=['E03', 'M07', 'M21']  # Wells with staurosporine/camptothecin
-        )
-        
-    References:
-        - Broad Bioimage Benchmark Collection: https://bbbc.broadinstitute.org/BBBC022
-        - Original paper: Gustafsdottir et al. (2013) PLoS ONE
-        - Metadata: https://data.broadinstitute.org/bbbc/BBBC022/BBBC022_v1_image.csv
+    Load BBBC022 images by selecting specific image file names using the canonical metadata CSV.
+
+        Contract:
+        - Select groups by compound
+            • Treatment: compound column contains any configured treatment term (case-insensitive substring).
+            • Control: compound column is blank (after stripping quotes/whitespace).
+        - Enforce even count and return half control and half treatment deterministically (no randomness).
+        - Read BBBC022_v1_image.csv (cached) and load images by filename from plate/channel zips.
+
+    Returns: (images, metadata)
+      - images: list of numpy arrays
+      - metadata: list of dicts with keys: image_name, plate, well, compound, condition
     """
-    
-    try:
-        from imageProcessingUtils.sample_data import fetch_bbbc022_samples
-    except ImportError as e:
-        raise ImportError(
-            "imageProcessingUtils package is required for BBBC022 functionality. "
-            "Install with: pip install git+https://github.com/Zbedd/imageProcessingUtils.git"
-        ) from e
-    
-    # Set default parameters optimized for DNA condensation analysis
-    if channels is None:
-        channels = ['OrigHoechst']  # DNA channel for condensation analysis
-    
-    # Setup intelligent caching
-    if use_cache and output_dir is None:
-        # Use global cache directory outside Git tracking
+    import pandas as pd
+    import requests
+
+    # Cache location
+    if output_dir is None and use_cache:
         cache_dir = BBBC022_CACHE_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
         output_dir = str(cache_dir)
-        print(f"Using persistent cache: {cache_dir}")
-        
-        # Check if required zip files already exist in cache
-        cache_raw_dir = cache_dir / "raw"
-        existing_zips = []
-        if cache_raw_dir.exists():
-            existing_zips = list(cache_raw_dir.glob("BBBC022_v1_images_*.zip"))
-        
-        cache_available = len(existing_zips) >= 2
-        if cache_available:
-            print(f"✓ Found {len(existing_zips)} cached zip files - using cached data")
-            print(f"  Cached files: {[z.name for z in existing_zips[:2]]}")
-        else:
-            print(f"Cache has {len(existing_zips)} zip files - will download missing files")
-            
-    elif output_dir:
-        print(f"Using specified output directory: {output_dir}")
-        cache_available = False
-    else:
-        cache_available = False
-    
-    print(f"Loading {count} BBBC022 images...")
-    print(f"Channels: {channels}")
-    print(f"Roles: {roles if roles else 'All available'}")
-    print(f"Wells: {wells if wells else 'All available'}")
-    
-    try:
-        # Delegate caching logic entirely to fetch_bbbc022_samples.
-        # It will use the raw .zip cache if available, or download fresh if not.
-        images, metadata = fetch_bbbc022_samples(
-            count=count,
-            channels=channels,
-            wells=wells,
-            nuclei_only=nuclei_only,
-            seed=seed,
-            output_dir=output_dir,
-            max_plates=max_plates
+    elif output_dir is None:
+        output_dir = str(BBBC022_CACHE_DIR)
+
+    cache_dir = Path(output_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = cache_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    # Metadata CSV
+    csv_path = cache_dir / "BBBC022_v1_image.csv"
+    url = "https://data.broadinstitute.org/bbbc/BBBC022/BBBC022_v1_image.csv"
+    if not csv_path.exists():
+        resp = requests.get(url, timeout=60)
+        if resp.status_code != 200:
+            raise RuntimeError(f"ERR_BBBC_METADATA_FETCH_FAILED: HTTP {resp.status_code}")
+        csv_path.write_bytes(resp.content)
+
+    # Read with robustness to columns quoting
+    df = pd.read_csv(
+        csv_path,
+        engine="python",
+        encoding="utf-8",
+        sep=",",
+        quotechar='"',
+        quoting=3,
+        on_bad_lines='skip'
+    )
+    df.columns = df.columns.str.strip().str.strip('"')
+
+    well_col = 'Image_Metadata_CPD_WELL_POSITION'
+    compound_col = 'Image_Metadata_SOURCE_COMPOUND_NAME'
+    plate_col = 'Image_Metadata_PlateID'
+    name_col_candidates = [
+        'Image_FileName_Hoechst',
+        'Image_FileName_DNA',
+        'Image_FileName_OrigHoechst',
+    ]
+    missing = [c for c in (well_col, compound_col, plate_col) if c not in df.columns]
+    if missing:
+        raise RuntimeError(
+            "ERR_MISSING_GROUPING_METADATA: required columns not found in BBBC022 metadata\n"
+            f"Required: {well_col}, {compound_col}, {plate_col}\n"
+            f"Missing:  {', '.join(missing)}"
+        )
+    name_col = None
+    for c in name_col_candidates:
+        if c in df.columns:
+            name_col = c
+            break
+    if not name_col:
+        raise RuntimeError(
+            "ERR_MISSING_IMAGE_NAME_COLUMN: could not find an image filename column in metadata\n"
+            f"Tried: {name_col_candidates}"
         )
 
-        if not images:
-            raise ValueError(
-                f"No images could be loaded with the specified criteria. "
-                f"Try increasing count or relaxing filters."
+    # Map metadata filename column to plate/channel zip index (w1..w5)
+    channel_map = {
+        # BBBC022 convention: w1 = Hoechst (DNA)
+        'Image_FileName_OrigHoechst': 1,
+        'Image_FileName_Hoechst': 1,
+        'Image_FileName_DNA': 1,
+        # Other channels
+        'Image_FileName_OrigER': 2,
+        'Image_FileName_OrigMito': 3,
+        'Image_FileName_OrigPh_golgi': 4,
+        'Image_FileName_OrigSyto': 5,
+    }
+    w_index = channel_map.get(name_col, 1)
+
+    # Helper to detect blank compound
+    def _is_blank(val):
+        if val is None:
+            return True
+        try:
+            if isinstance(val, float) and np.isnan(val):
+                return True
+        except Exception:
+            pass
+        if isinstance(val, str):
+            s = val.strip()
+            if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+                s = s[1:-1].strip()
+            return s == ""
+        return False
+
+    if count % 2 != 0:
+        raise ValueError(
+            "ERR_COUNT_NOT_EVEN: even count required for balanced sampling\n"
+            f"Requested: {count}\n"
+            "Action: set an even 'count' in bbbc022_settings"
+        )
+    half = count // 2
+    
+    # Determine groups by compound
+    bbbc_cfg = config.get("bbbc022_settings", {})
+    treatment_terms = bbbc_cfg.get("treatment_compounds", []) or []
+    if not treatment_terms:
+        raise RuntimeError(
+            "ERR_MISSING_TREATMENT_TERMS: config.bbbc022_settings.treatment_compounds must list treatment identifiers"
+        )
+    comp_series = df[compound_col].astype(str)
+    treat_mask = np.zeros(len(df), dtype=bool)
+    for term in treatment_terms:
+        if isinstance(term, str) and term.strip():
+            treat_mask |= comp_series.str.contains(term, case=False, na=False).to_numpy()
+    ctrl_mask = df[compound_col].apply(_is_blank).to_numpy()
+    df_treat = df[treat_mask].copy()
+    df_ctrl = df[ctrl_mask].copy()
+
+    # Deterministic selection: sort by image filename column, then take first N
+    df_ctrl_sorted = df_ctrl.sort_values(by=name_col, kind='stable')
+    df_treat_sorted = df_treat.sort_values(by=name_col, kind='stable')
+
+    if len(df_ctrl_sorted) < half or len(df_treat_sorted) < half:
+        raise ValueError(
+            "ERR_INSUFFICIENT_GROUP_SAMPLES: cannot satisfy balanced selection from compound-based groups\n"
+            f"Requested per-group: {half}\n"
+            f"Available - treatment: {len(df_treat_sorted)}, control: {len(df_ctrl_sorted)}\n"
+            "Action: reduce count or update bbbc022_settings.treatment_compounds"
+        )
+
+    sel_ctrl = df_ctrl_sorted.head(half).assign(__g='control')
+    sel_treat = df_treat_sorted.head(half).assign(__g='treatment')
+    sel = pd.concat([sel_treat, sel_ctrl], ignore_index=True)
+
+    # Determine which plate/channel zips are needed for the selected channel only
+    plates_needed = sorted({str(row[plate_col]) for _, row in sel.iterrows()})
+    print(plates_needed)
+    print(f"Using channel w{w_index} based on column {name_col}")
+
+    print(f"Determining zip files needed for plates: {plates_needed}")
+
+    zip_urls = []
+    for plate in plates_needed:
+        zip_urls.append(f"https://www.broadinstitute.org/bbbc/BBBC022/BBBC022_v1_images_{plate}w{w_index}.zip")
+
+    # Download needed zips if missing
+    local_zips: List[Path] = []
+    for u in zip_urls:
+        name = u.split("/")[-1]
+        p = raw_dir / name
+        if not p.exists():
+            r = requests.get(u, timeout=120, allow_redirects=True)
+            if r.status_code != 200:
+                # Non-200 likely means this plate/channel doesn't exist; skip it silently
+                continue
+            p.write_bytes(r.content)
+            print(f"Downloaded {name}")
+        local_zips.append(p)
+
+    if not local_zips:
+        raise RuntimeError("ERR_BBBC_ZIPS_UNAVAILABLE: no plate/channel zip files could be downloaded or found in cache")
+
+    # Create index of zip members for fast lookup
+    zip_members: Dict[str, Tuple[Path, zipfile.ZipInfo]] = {}
+    for zp in local_zips:
+        with zipfile.ZipFile(zp, 'r') as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                fname = Path(info.filename).name
+                if fname not in zip_members:
+                    zip_members[fname] = (zp, info)
+
+    # Load selected images by filename
+    images: List[np.ndarray] = []
+    metadata: List[Dict[str, Any]] = []
+    for _, row in sel.iterrows():
+        fname = str(row[name_col]).strip()
+        if fname.startswith('"') and fname.endswith('"'):
+            fname = fname[1:-1]
+        if fname not in zip_members:
+            raise RuntimeError(
+                "ERR_MISSING_ZIP_MEMBERS: selected filename not found in any BBBC022 zip\n"
+                f"Missing: {fname}"
             )
+        zp, info = zip_members[fname]
+        with zipfile.ZipFile(zp, 'r') as zf:
+            with zf.open(info) as fh:
+                data = fh.read()
+        try:
+            from skimage.io import imread
+        except Exception as e:
+            raise ImportError("scikit-image is required to read BBBC022 image files (pip install scikit-image)") from e
+        img_bytes = io.BytesIO(data)
+        img = imread(img_bytes)
+        if img.dtype != np.float32 and img.dtype != np.float64:
+            img = img.astype(np.float32)
+        images.append(img)
+        md = {
+            'image_name': fname,
+            'plate': str(row[plate_col]),
+            'well': str(row[well_col]).strip('"').upper(),
+            'compound': None if _is_blank(row[compound_col]) else str(row[compound_col]),
+            'condition': row.get('__g', 'unknown'),
+        }
+        metadata.append(md)
 
-        # Ensure images are in the expected format for the pipeline
-        processed_images = []
-        for img in images:
-            if img.dtype != np.float32 and img.dtype != np.float64:
-                # Convert to float for processing pipeline compatibility
-                img = img.astype(np.float32)
-            processed_images.append(img)
+    if len(images) != count:
+        raise ValueError(
+            "ERR_IMAGE_COUNT_MISMATCH: did not load requested number of images\n"
+            f"Requested: {count}, Loaded: {len(images)}"
+        )
 
-        print(f"✓ Successfully loaded {len(processed_images)} BBBC022 images")
-        print(f"  Image shape: {processed_images[0].shape}")
-        print(f"  Data type: {processed_images[0].dtype}")
-
-        # Count wells in final dataset for information
-        if metadata:
-            well_counts = {}
-            for meta in metadata:
-                well = meta.get('well', 'Unknown')
-                well_counts[well] = well_counts.get(well, 0) + 1
-            print(f"  Well distribution: {dict(sorted(well_counts.items())[:5])}{'...' if len(well_counts) > 5 else ''}")
-
-        return processed_images, metadata
-
-    except Exception as e:
-        raise ValueError(f"Failed to load BBBC022 images: {e}") from e
+    print(f"✓ Loaded {len(images)} BBBC022 images by filename")
+    return images, metadata

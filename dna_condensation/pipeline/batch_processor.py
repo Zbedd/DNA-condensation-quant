@@ -173,9 +173,10 @@ def prepare_bbbc022_inputs():
   
   raw_images, metadata = load_bbbc022_images(
     count=bbbc022_config.get('count', 20),
-    channels=bbbc022_config.get('channels', ['OrigHoechst']),
     seed=bbbc022_config.get('seed', 42),
-    output_dir=str(validation_output_path / "bbbc022_data")
+    output_dir=str(validation_output_path / "bbbc022_data"),
+    use_cache=True,
+    group_mapping=bbbc022_config.get('group_mapping')
   )
   
   # Ensure dtype is uint8 for downstream preprocessing/segmentation
@@ -208,53 +209,11 @@ def prepare_bbbc022_inputs():
   
   print(f"✓ Loaded {len(raw_images)} BBBC022 images")
   
-  # Add experimental metadata (control vs treatment groups)
-  # Use the grouping configuration from bbbc022_settings
-  group_mapping = bbbc022_config.get('group_mapping')
-  auto_group_split = bbbc022_config.get('auto_group_split', True)
+  # Use image names provided by loader metadata
+  image_names = [m.get('image_name') for m in metadata]
   
-  if not auto_group_split and group_mapping:
-    # Manual group mapping using well IDs
-    control_wells = set(group_mapping.get("control", []))
-    treatment_wells = set(group_mapping.get("treatment", []))
-    
-    enhanced_metadata = []
-    for i, meta in enumerate(metadata):
-      enhanced_meta = meta.copy()
-      well = meta.get('well', '')
-      
-      if well in control_wells:
-        enhanced_meta['condition'] = 'control'
-        enhanced_meta['dk_group'] = 'mock'
-      elif well in treatment_wells:
-        enhanced_meta['condition'] = 'treatment' 
-        enhanced_meta['dk_group'] = 'compound'
-      else:
-        raise ValueError(f"Well '{well}' not found in manual group mapping. "
-                        f"Control wells: {control_wells}, Treatment wells: {treatment_wells}")
-      
-      # Ensure image_name is set
-      if 'image_name' not in enhanced_meta:
-        enhanced_meta['image_name'] = enhanced_meta.get('filename', f'bbbc022_image_{i+1}')
-      
-      enhanced_metadata.append(enhanced_meta)
-      
-  else:
-    # Automatic group identification - this should use proper BBBC022 metadata
-    # For now, raise an error until we implement proper metadata loading
-    raise NotImplementedError(
-      "Automatic BBBC022 group identification not yet implemented. "
-      "Please use manual group mapping in config.yaml by setting:\n"
-      "bbbc022_settings:\n"
-      "  auto_group_split: false\n"
-      "  group_mapping:\n"
-      "    control: ['A01', 'A02', ...]  # Add actual control well IDs\n"
-      "    treatment: ['B01', 'B02', ...] # Add actual treatment well IDs"
-    )
-  
-  image_names = [meta['image_name'] for meta in enhanced_metadata]
-  
-  return raw_images, image_names, enhanced_metadata
+  # Return images with names and unmodified metadata (loader is the single source of truth)
+  return raw_images, image_names, metadata
 
 
 def run_unified_pipeline(raw_images, image_names, metadata, output_dir, input_source, return_images=False):
@@ -435,18 +394,17 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
     # Get image aggregation setting from config
     statistical_config = config.get("statistical_analysis", {})
     use_image_aggregation = statistical_config.get("use_image_aggregation", True)
-    
-    # Handle metadata sources differently:
-    # - ND2: metadata=None, use filename parsing via original extract_experimental_metadata
-    # - BBBC022: metadata=list, use provided metadata via patching
+  # Handle metadata sources differently:
+  # - If metadata is None: use filename parsing via original extract_experimental_metadata
+  # - If metadata is provided: use it directly by patching the extractor during this run
     from dna_condensation.analysis import feature_extractor as _fe
     from dna_condensation.analysis import analysis_pipeline as _ap
     _orig_extract = getattr(_fe, 'extract_experimental_metadata', None)
     _orig_ap_extract = getattr(_ap, 'extract_experimental_metadata', None)
 
     if metadata is None:
-      # ND2 case: Use original metadata extraction from filenames
-      print("Using filename-based metadata extraction for ND2 files")
+      # Use original metadata extraction from filenames
+      print("Using filename-based metadata extraction from image names")
       analysis_results = run_analysis_from_batch_processor(
         global_preprocessed_images=global_preprocessed_images,
         per_nucleus_preprocessed_images=per_nucleus_preprocessed_images,
@@ -457,8 +415,8 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
         config=config._config
       )
     else:
-      # BBBC022 case: Patch metadata extraction to use provided metadata
-      print("Using provided metadata for BBBC022 files")
+      # Patch metadata extraction to use provided metadata
+      print("Using provided metadata from loader")
       
       def _patched_extract(image_names_list):
         import pandas as pd
@@ -471,14 +429,10 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
           m = meta_by_name.get(name, {})
           if not m:
             raise ValueError(f"No metadata found for image '{name}'. Available images: {list(meta_by_name.keys())}")
-          
+          # Keep metadata minimal and generic for downstream pipeline
           records.append({
             'image_name': name,
-            'dk_group': m.get('dk_group', 'unknown'),
-            'dk_number': m.get('dk_number'),
-            'condition': m.get('condition', 'unknown'), 
-            'well': m.get('well'),
-            'timepoint': m.get('timepoint', m.get('plate', 'BBBC022'))
+            'condition': m.get('condition', 'unknown'),
           })
         return pd.DataFrame(records)
 
