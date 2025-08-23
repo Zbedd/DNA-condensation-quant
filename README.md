@@ -111,8 +111,12 @@ features_df = pipeline.analyze_nd2_file(
 
 This pipeline extracts a comprehensive set of features to quantify nuclear changes. The metrics are grouped into categories based on their scientific purpose and their relationship with intensity normalization.
 
+**Data Processing Pipeline:**
+- **Globally preprocessed images**: Background corrected and globally normalized, but NOT per-nucleus normalized
+- **Per-nucleus normalized images**: Each nucleus individually normalized to have mean intensity = 1.0
+
 ### Intensity-Based Metrics
-These metrics directly measure the amount and distribution of the fluorescence signal. They are sensitive to absolute intensity levels and are calculated on data that has **not** undergone per-nucleus normalization to allow for valid comparisons between different cells and experimental groups.
+These metrics directly measure the amount and distribution of the fluorescence signal. They are sensitive to absolute intensity levels and are calculated on **globally preprocessed** data (background corrected, globally normalized) that has **not** undergone per-nucleus normalization. This preserves relative intensity differences between nuclei for valid experimental comparisons.
 
 - **Statistical Measures**: `mean_intensity`, `std_intensity`, `coefficient_of_variation` (CV), `min_intensity`, `max_intensity`, `intensity_range`
 - **Distribution Shape**: `intensity_skewness`, `intensity_kurtosis`, `intensity_entropy`
@@ -120,10 +124,12 @@ These metrics directly measure the amount and distribution of the fluorescence s
 - **Derived Intensity**: `nuclear_density`
 - **Spatial Intensity**: `radial_shell_{0...N-1}`, `center_to_edge_ratio`
 - **Granulometry**: `granulometry_spots_r{radius}`, `granulometry_area_r{radius}`, `granulometry_area_fraction_r{radius}`
- - **Condensation metrics**: `ccp` (Chromatin Condensation Parameter; Sobel edge fraction within nucleus), `condensation_index` (CI; z(P95) - z(log area) using control group)
+- **DNA Condensation Metrics**: 
+  - `ccp` (Chromatin Condensation Parameter): Edge fraction based on Sobel gradient magnitudes within each nucleus
+  - `condensation_index` (CI): Combined metric using P95 intensity and nuclear area, normalized using control group statistics: CI = z(P95) - z(log area)
 
 ### Texture-Based Metrics
-These metrics quantify the spatial arrangement and patterns of pixels within a nucleus, providing insight into chromatin texture (e.g., smooth, coarse, clumped). To ensure that these comparisons are not confounded by absolute brightness, these features are best calculated on data that **has** been subjected to per-nucleus intensity normalization.
+These metrics quantify the spatial arrangement and patterns of pixels within a nucleus, providing insight into chromatin texture (e.g., smooth, coarse, clumped). To ensure that these comparisons are not confounded by absolute brightness differences, these features are calculated on **per-nucleus normalized** data where each nucleus has been individually scaled to have mean intensity = 1.0.
 
 - **GLCM Contrast**: `glcm_contrast_mean`, `glcm_contrast_std`
 - **GLCM Dissimilarity**: `glcm_dissimilarity_mean`, `glcm_dissimilarity_std`

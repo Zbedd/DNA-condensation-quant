@@ -285,13 +285,13 @@ class DNACondensationFeatureExtractor:
         high_threshold = np.percentile(intensity_values, self.high_intensity_percentile)
         features['high_intensity_fraction'] = np.mean(intensity_values >= high_threshold)
         
-    # Distribution shape characteristics - with robustness checks
-    from scipy.stats import skew, kurtosis
+        # Distribution shape characteristics - with robustness checks
+        from scipy.stats import skew, kurtosis
 
-    # Check for sufficient variance to avoid catastrophic cancellation
-    intensity_variance = np.var(intensity_values)
-    intensity_std = np.std(intensity_values)
-    cv = float(intensity_std / (mean_intensity + eps))
+        # Check for sufficient variance to avoid catastrophic cancellation
+        intensity_variance = np.var(intensity_values)
+        intensity_std = np.std(intensity_values)
+        cv = float(intensity_std / (mean_intensity + eps))
         
         # Only calculate skewness/kurtosis if we have sufficient variance
         # CV < 0.01 indicates nearly uniform data that will cause numerical issues
