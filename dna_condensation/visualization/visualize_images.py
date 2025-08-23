@@ -48,7 +48,7 @@ class ImageVisualizer:
             self.config = Config(config_file)
         else:
             self.config = shared_config
-        
+
         # Get visualization settings from config
         viz_config = self.config.get("image_visualization", {})
         self.n_images = viz_config.get("n_images", 6)
@@ -59,6 +59,8 @@ class ImageVisualizer:
         self.contour_width = viz_config.get("contour_width", 1.0)
         self.figure_size = viz_config.get("figure_size", [15, 10])
         self.colormap = viz_config.get("colormap", "gray")
+        # Colormap used for labeled-object overlays (distinct colors per object)
+        self.label_colormap = viz_config.get("label_colormap", "tab20")
         
         # Handle ND2 selection configuration
         self.selection_config = selection_override if selection_override is not None else self.config.get("nd2_selection_settings")
@@ -174,7 +176,11 @@ class ImageVisualizer:
         return img
     
     def _add_segmentation_overlay(self, ax, mask, color="red", alpha=0.3, contour_width=1.0, show_overlay=True, show_contours=True):
-        """Add segmentation overlay to image with separate control for fill and contours."""
+        """Add segmentation overlay with support for color-coded labeled objects.
+
+        If mask contains integer labels (>1), each object will be drawn with a distinct
+        color using self.label_colormap. Otherwise, a single-color overlay is used.
+        """
         if mask is None:
             return None, None
             
@@ -183,23 +189,46 @@ class ImageVisualizer:
         
         # Add filled overlay if requested
         if show_overlay:
-            # Create colored overlay for segmented regions
-            colored_mask = np.zeros((*mask.shape, 4))
-            
-            # Set color for segmented regions (non-zero in mask)
-            segmented = mask > 0
-            if color == "red":
-                colored_mask[segmented] = [1, 0, 0, alpha]
-            elif color == "blue":
-                colored_mask[segmented] = [0, 0, 1, alpha]
-            elif color == "green":
-                colored_mask[segmented] = [0, 1, 0, alpha]
-            elif color == "yellow":
-                colored_mask[segmented] = [1, 1, 0, alpha]
+            # Make overlays easier to see: half as transparent (double alpha, cap at 1.0)
+            used_alpha = min(1.0, float(alpha) * 2.0)
+            # Determine if mask is labeled (per-object IDs)
+            try:
+                mask_max = int(np.max(mask))
+            except Exception:
+                mask_max = 0
+
+            is_integer_mask = np.issubdtype(mask.dtype, np.integer)
+            is_labeled = is_integer_mask and mask_max > 1
+
+            if is_labeled:
+                # Create color lookup table for labels using the configured colormap
+                cmap = plt.get_cmap(self.label_colormap)
+                n_colors = getattr(cmap, 'N', 256)
+
+                # Build LUT: index 0 is fully transparent; 1..max get distinct colors
+                lut = np.zeros((mask_max + 1, 4), dtype=float)
+                for lbl in range(1, mask_max + 1):
+                    rgba = list(cmap((lbl % n_colors) / max(1, n_colors - 1)))
+                    rgba[3] = used_alpha  # increased opacity
+                    lut[lbl] = rgba
+
+                colored_mask = lut[mask.astype(int)]  # (H, W, 4)
+                overlay_artist = ax.imshow(colored_mask, alpha=1.0)
             else:
-                colored_mask[segmented] = [1, 0, 0, alpha]  # Default to red
-            
-            overlay_artist = ax.imshow(colored_mask, alpha=1.0)  # The colored_mask already has alpha built in
+                # Binary mask → single-color overlay
+                colored_mask = np.zeros((*mask.shape, 4), dtype=float)
+                segmented = mask > 0
+                if color == "red":
+                    colored_mask[segmented] = [1, 0, 0, used_alpha]
+                elif color == "blue":
+                    colored_mask[segmented] = [0, 0, 1, used_alpha]
+                elif color == "green":
+                    colored_mask[segmented] = [0, 1, 0, used_alpha]
+                elif color == "yellow":
+                    colored_mask[segmented] = [1, 1, 0, used_alpha]
+                else:
+                    colored_mask[segmented] = [1, 0, 0, used_alpha]  # Default to red
+                overlay_artist = ax.imshow(colored_mask, alpha=1.0)  # colored_mask already encodes alpha
         
         # Add contours if requested
         if show_contours:
@@ -216,7 +245,7 @@ class ImageVisualizer:
                             contour_artist = line_artist
                 except Exception:
                     pass  # Skip contours if both methods fail
-                    
+        
         return overlay_artist, contour_artist
     
     def visualize_processing_stages(self, save_path=None, auto_save=True):

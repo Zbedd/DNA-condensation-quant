@@ -87,6 +87,25 @@ class Config:
         """String representation of configuration."""
         return f"Config({self._config})"
 
+    # Convenience helpers
+    def get_nuclear_channel_index(self) -> int:
+        """
+        Return the nuclear DNA channel index based on input_source.
+
+        - For input_source == 'nd2': reads nd2_selection_settings.nuclear_channel_index
+        - For input_source == 'bbbc022': reads bbbc022_settings.nuclear_channel_index
+        Falls back to 0 if not set.
+        """
+        src = str(self.get('input_source', 'nd2')).lower()
+        if src == 'nd2':
+            nd2_cfg = self.get('nd2_selection_settings', {}) or {}
+            return int(nd2_cfg.get('nuclear_channel_index', 0))
+        elif src == 'bbbc022':
+            bcfg = self.get('bbbc022_settings', {}) or {}
+            return int(bcfg.get('nuclear_channel_index', 0))
+        # Unknown source → conservative default
+        return 0
+
 
 # Global configuration instance - loads from config.yaml automatically
 config = Config()

@@ -6,7 +6,7 @@
 
 # 1. Process a minimal number of images to speed up I/O and processing loops.
 nd2_selection_settings:
-  count: 5  # Process less ND2 files to speed up analysis.
+  count: 2  # Process less ND2 files to speed up analysis.
 
 bbbc022_settings:
   count: 6 # Process less ND2 files to speed up analysis.

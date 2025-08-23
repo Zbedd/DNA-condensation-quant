@@ -223,7 +223,7 @@ def run_unified_pipeline(raw_images, image_names, metadata, output_dir, input_so
   print("="*60)
   
   # Get configuration parameters
-  channel_index = config.get("segmentation_channel_index")
+  channel_index = config.get_nuclear_channel_index()
   segmentation_method = config.get("segmentation_method")
   preprocessing_config = config.get("preprocessing")
   

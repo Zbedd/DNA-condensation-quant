@@ -55,7 +55,10 @@ raw_nd2_path: "/path/to/your/nd2/files"
 output_path: "./output"
 
 # Microscope settings
-segmentation_channel_index: 1  # DNA staining channel
+nd2_selection_settings:
+    nuclear_channel_index: 1   # DNA staining channel in ND2 (e.g., Channel 1)
+bbbc022_settings:
+    nuclear_channel_index: 0   # Single-channel BBBC022 (use 0)
 segmentation_method: "otsu"    # Options: "yolo", "watershed", "otsu"
 
 # Analysis parameters
@@ -285,7 +288,7 @@ plot_comparison_summary(
 ### Common Issues
 
 **Low Segmentation Quality:**
-- Adjust `segmentation_channel_index` to DNA staining channel
+- Adjust `nd2_selection_settings.nuclear_channel_index` (ND2) or `bbbc022_settings.nuclear_channel_index` (BBBC022) to the DNA staining channel
 - Try different segmentation methods (otsu → watershed → yolo)
 - Check image preprocessing parameters
 

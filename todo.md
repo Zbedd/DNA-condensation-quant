@@ -7,3 +7,4 @@ Validate that batch_processor is working
 Revisit nuclei filtering as needed
 Figure out why nuclear density = 1 {cm:2025-08-18}
 Important: write a script to validate bbbc image grouping
+Improve filtering. I had to set min_size relative to medium to >100, indicating most cells are noise.

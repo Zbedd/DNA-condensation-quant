@@ -29,6 +29,7 @@ nd2_selection_settings:
     include_patterns: null       # List of patterns that must ALL be present (AND logic)
     exclude_patterns: null       # List of patterns to exclude (if ANY present, file excluded)
   seed: 42                       # Seed for reproducible balanced random sampling
+  nuclear_channel_index: 1       # Expected 1 where channel 0 = GFP, channel 1 = DNA
   # Note: Always uses balanced random sampling - equal representation across ID+name groups
 
 # ==== BBBC022 VALIDATION SETTINGS ====
@@ -37,35 +38,45 @@ bbbc022_settings:
   channels: ['OrigHoechst']     # Channels to load (DNA staining)
   seed: 42                      # Random seed for reproducible sampling
   auto_group_split: false       # Set to false to use manual group mapping (automatic not yet implemented)
+  nuclear_channel_index: 0      # BBBC022 images are single-channel (use 0)
   # Compounds considered as DNA-condensation-inducing treatments for grouping (case-insensitive substring match)
   treatment_compounds:
     - "staurosporine"
     - "camptothecin"
     - "10-hydroxycamptothecin"
 
-# ==== MICROSCOPE SETTINGS ====
-# Adjust these based on your microscope configuration
-image_channels:
-  - "Channel_0"    # LSD1 GFP channel
-  - "Channel_1"    # DNA staining channel
-
 # ==== SEGMENTATION SETTINGS ====
-# Channel selection for nucleus segmentation
-segmentation_channel_index: 0   # index to use for quantification (0 = single channel for BBBC022) 
 # Segmentation method: 'yolo' (AI-based) or 'watershed' (traditional image processing)
 segmentation_method: "stardist"    # Options: "yolo", "watershed", 'otsu'
+
+# Optional per-method tuning
+segmentation_settings:
+  stardist:
+    nms_thresh: 0.2            # Non-maximum suppression IoU threshold. Lower merges overlapping fragments more aggressively.
+                               # StarDist default is ~0.4; 0.30 is a good starting point to reduce over-splitting.
+    prob_thresh: 0.75          # Detection probability threshold (null = use StarDist default)
+    min_size: null             # Minimum instance size in pixels (null = use StarDist default)
+
+
 
 # Size-based filtering (removes small objects relative to median size)
 size_filtering:
   enabled: true                 # Enable/disable size-based filtering
-  min_size_percentage: 20       # Minimum size as percentage of median (e.g., 20 = 20% of median)
+  min_size_percentage: 30       # Minimum size as percentage of median (e.g., 20 = 20% of median)
+
+#=== SIZE FILTERING SUMMARY EXAMPLE ===
+# Original objects: 66
+#  5% filter:  66 objects (  0.0% removed)
+# 10% filter:  66 objects (  0.0% removed)
+# 20% filter:  64 objects (  3.0% removed)
+# 30% filter:  62 objects (  6.1% removed)
 
 # Quality filtering for feature extraction (percentage-based, adaptive)
 quality_filtering:
   enabled: true                 # Enable/disable quality filtering in feature extraction
   area_percentiles:             # Area-based filtering using percentiles of detected objects
-    min_percentile: 1           # Minimum area (1st percentile - very permissive for BBBC022)
-    max_percentile: 99          # Maximum area (99th percentile - very permissive for BBBC022)
+    min_percentile: 1           # Minimum area (E.g. 1 is 1st percentile - very permissive for BBBC022)
+    max_percentile: 99          # Maximum area (E.g. 99 is 99th percentile - very permissive for BBBC022)
   intensity_filtering:          # Intensity-based quality checks
     min_dynamic_range: 1e-6     # Minimum intensity range (max - min)
     min_mean_intensity: 1e-6    # Minimum mean intensity (avoid pure background)
@@ -79,13 +90,6 @@ feature_extraction:
   radial_shells: 5                # Number of radial shells for spatial analysis
   texture_distance: 1             # Distance for texture analysis (GLCM)
   granulometry_radii: [3, 5, 7, 10, 15]  # Radii for granulometry analysis
-
-#=== SIZE FILTERING SUMMARY EXAMPLE ===
-# Original objects: 66
-#  5% filter:  66 objects (  0.0% removed)
-# 10% filter:  66 objects (  0.0% removed)
-# 20% filter:  64 objects (  3.0% removed)
-# 30% filter:  62 objects (  6.1% removed)
 
 # ==== PROCESSING SETTINGS ====
 # Preprocessing options for homogeneity analysis

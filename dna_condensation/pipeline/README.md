@@ -135,7 +135,10 @@ bbbc022_settings:
 
 ### Processing Parameters
 ```yaml
-segmentation_channel_index: 0        # Channel for nucleus detection
+nd2_selection_settings:
+  nuclear_channel_index: 1       # Channel for nucleus detection in ND2
+bbbc022_settings:
+  nuclear_channel_index: 0       # Single-channel index for BBBC022
 segmentation_method: "otsu"          # Segmentation algorithm
 preprocessing:
   background_correction: true        # Enable background correction

@@ -520,10 +520,44 @@ def segment_image_stardist(image: np.ndarray, channel_index: int, use_gpu: bool 
         else:
             n_tiles = None
 
-        if n_tiles is None:
-            labels, _ = model.predict_instances(img)
-        else:
-            labels, _ = model.predict_instances(img, n_tiles=n_tiles)
+        # Load optional StarDist tuning parameters from config
+        try:
+            from dna_condensation.pipeline.config import config as _cfg
+            sd_cfg = (_cfg.get('segmentation_settings', {}) or {}).get('stardist', {}) or {}
+        except Exception:
+            sd_cfg = {}
+
+        # Build kwargs, only include keys when user provided them so defaults are preserved
+        predict_kwargs: dict = {}
+        # Suggested default: nms_thresh 0.30 if not provided
+        # Accept common misspellings too
+        nms_keys = ['nms_thresh', 'nms_thres', 'nms_thress', 'nms_threshold']
+        nms_val = None
+        for k in nms_keys:
+            if k in sd_cfg and sd_cfg.get(k) is not None:
+                nms_val = sd_cfg.get(k)
+                break
+        if nms_val is None:
+            nms_val = 0.30
+        try:
+            nms_f = float(nms_val)
+        except Exception:
+            nms_f = 0.30
+            print(f"Warning: invalid nms_thresh value '{nms_val}', using 0.30")
+        predict_kwargs['nms_thresh'] = nms_f
+
+        prob_thresh = sd_cfg.get('prob_thresh', None)
+        if prob_thresh is not None:
+            predict_kwargs['prob_thresh'] = float(prob_thresh)
+
+        min_size = sd_cfg.get('min_size', None)
+        if min_size is not None:
+            predict_kwargs['min_size'] = int(min_size)
+
+        if n_tiles is not None:
+            predict_kwargs['n_tiles'] = n_tiles
+
+        labels, _ = model.predict_instances(img, **predict_kwargs)
     except Exception as e:
         print(f"StarDist segmentation failed: {e}")
         # Return empty mask on failure
