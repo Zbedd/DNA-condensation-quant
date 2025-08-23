@@ -2,7 +2,7 @@
 # Edit the values below for your specific analysis
 
 ## DEVELOPMENT SETTINGS
-dev_mode: true                 # If true, settings from dev_config.yaml will override these settings
+dev_mode: false                 # If true, settings from dev_config.yaml will override these settings
 
 # ==== FILE PATHS ====
 # ==== INPUT SOURCE CONFIGURATION ====
@@ -96,7 +96,7 @@ feature_extraction:
 preprocessing:
   background_correction: true   # Apply rolling ball background correction (RECOMMENDED)
                                   # May wish to disable because radius difficult to quantify and is slow
-  bg_ball_radius: 150           # Rolling ball radius (adjust based on nucleus size)
+  bg_ball_radius: 75           # Rolling ball radius (adjust based on nucleus size)
                                   # Should always be set to be slightly larger than the
                                   # largest nucleus in your images to ensure that only the
                                   # true, large-scale background variations are removed.

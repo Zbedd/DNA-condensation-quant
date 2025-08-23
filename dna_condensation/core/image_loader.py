@@ -95,10 +95,9 @@ def get_nd2_objects(path: Optional[str] = None, selection_config: Optional[Dict[
 
 def load_bbbc022_images(
     count: int = 10,
-    seed: Optional[int] = None,
     output_dir: Optional[str] = None,
     use_cache: bool = True,
-    group_mapping: Optional[Dict[str, List[str]]] = None,
+    return_image_names_only: bool = False,
 ) -> Tuple[List[np.ndarray], List[Dict[str, Any]]]:
     """
     Load BBBC022 images by selecting specific image file names using the canonical metadata CSV.
@@ -109,6 +108,8 @@ def load_bbbc022_images(
             • Control: compound column is blank (after stripping quotes/whitespace).
         - Enforce even count and return half control and half treatment deterministically (no randomness).
         - Read BBBC022_v1_image.csv (cached) and load images by filename from plate/channel zips.
+
+    If return_image_names_only is True, only the image names will be returned (without the actual image data).
 
     Returns: (images, metadata)
       - images: list of numpy arrays
@@ -246,6 +247,16 @@ def load_bbbc022_images(
     sel_ctrl = df_ctrl_sorted.head(half).assign(__g='control')
     sel_treat = df_treat_sorted.head(half).assign(__g='treatment')
     sel = pd.concat([sel_treat, sel_ctrl], ignore_index=True)
+    
+    # Return just the image names (no zip discovery or downloads)
+    if return_image_names_only:
+        planned_names: List[str] = []
+        for _, row in sel.iterrows():
+            fname = str(row[name_col]).strip()
+            if fname.startswith('"') and fname.endswith('"'):
+                fname = fname[1:-1]
+            planned_names.append(fname)
+        return planned_names
 
     # Determine which plate/channel zips are needed for the selected channel only
     plates_needed = sorted({str(row[plate_col]) for _, row in sel.iterrows()})
