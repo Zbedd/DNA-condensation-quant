@@ -173,10 +173,8 @@ def prepare_bbbc022_inputs():
   
   raw_images, metadata = load_bbbc022_images(
     count=bbbc022_config.get('count', 20),
-    seed=bbbc022_config.get('seed', 42),
     output_dir=str(Path("dna_condensation/validation/bbbc022_data")),
     use_cache=True,
-    group_mapping=bbbc022_config.get('group_mapping')
   )
   
   # Ensure dtype is uint8 for downstream preprocessing/segmentation

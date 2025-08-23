@@ -156,6 +156,13 @@ class DNACondensationAnalysisPipeline:
         print("\n3. QUALITY CONTROL")
         print("-" * 30)
         self.features_df = self.statistics.quality_control(self.features_df)
+
+        # Step 3b: Compute Condensation Index (CI) if a control group exists
+        try:
+            self._add_condensation_index(self.features_df)
+            print("Computed condensation_index (CI) using control group statistics")
+        except Exception as e:
+            warnings.warn(f"CI computation skipped: {e}")
         
         # Step 4: Statistical analysis
         print("\n4. STATISTICAL ANALYSIS")
@@ -243,6 +250,41 @@ class DNACondensationAnalysisPipeline:
             'figures': figures,
             'summary_report': summary_report
         }
+
+    def _add_condensation_index(self, df: pd.DataFrame, group_column: str = 'condition', control_label: str = 'control') -> None:
+        """Compute Condensation Index (CI) and attach as a new column.
+
+        CI_n = z(P95_n) - z(log A_n), using control group to estimate means/stds.
+        If no explicit 'control' label is present, pick the lexicographically first group.
+        """
+        required = ['intensity_p95', 'area', group_column]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            raise ValueError(f"ERR_MISSING_FIELDS_FOR_CI: missing columns {missing}")
+
+        groups = df[group_column].dropna().unique()
+        if len(groups) == 0:
+            raise ValueError("ERR_NO_GROUPS_FOR_CI: empty group labels")
+
+        if control_label not in groups:
+            # fallback to first available group
+            control_label = sorted([str(g) for g in groups])[0]
+
+        ctrl = df[df[group_column] == control_label]
+        if len(ctrl) < 2:
+            raise ValueError("ERR_INSUFFICIENT_CONTROL_FOR_CI: need >=2 control nuclei")
+
+        eps = 1e-8
+        mu_p95 = float(ctrl['intensity_p95'].mean())
+        sd_p95 = float(ctrl['intensity_p95'].std() + eps)
+        mu_logA = float(np.log(ctrl['area']).mean())
+        sd_logA = float(np.log(ctrl['area']).std() + eps)
+
+        # Compute per-row CI
+        p95 = df['intensity_p95'].astype(float)
+        logA = np.log(df['area'].astype(float) + eps)
+        ci = (p95 - mu_p95) / sd_p95 - (logA - mu_logA) / sd_logA
+        df['condensation_index'] = ci.astype(float)
     
     def _get_analysis_features(self) -> List[str]:
         """

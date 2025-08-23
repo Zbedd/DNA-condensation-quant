@@ -112,14 +112,15 @@ features_df = pipeline.analyze_nd2_file(
 This pipeline extracts a comprehensive set of features to quantify nuclear changes. The metrics are grouped into categories based on their scientific purpose and their relationship with intensity normalization.
 
 ### Intensity-Based Metrics
-These metrics directly measure the amount and distribution of the fluorescence signal. They are sensitive to absolute intensity levels and should be calculated on data that has **not** undergone per-nucleus normalization to allow for valid comparisons between different cells and experimental groups.
+These metrics directly measure the amount and distribution of the fluorescence signal. They are sensitive to absolute intensity levels and are calculated on data that has **not** undergone per-nucleus normalization to allow for valid comparisons between different cells and experimental groups.
 
-- **Statistical Measures**: `mean_intensity`, `std_intensity`, `coefficient_of_variation`, `min_intensity`, `max_intensity`, `intensity_range`
+- **Statistical Measures**: `mean_intensity`, `std_intensity`, `coefficient_of_variation` (CV), `min_intensity`, `max_intensity`, `intensity_range`
 - **Distribution Shape**: `intensity_skewness`, `intensity_kurtosis`, `intensity_entropy`
 - **Percentile-Based**: `intensity_p{10, 25, 50, 75, 90, 95, 99}`, `high_intensity_fraction`
 - **Derived Intensity**: `nuclear_density`
 - **Spatial Intensity**: `radial_shell_{0...N-1}`, `center_to_edge_ratio`
 - **Granulometry**: `granulometry_spots_r{radius}`, `granulometry_area_r{radius}`, `granulometry_area_fraction_r{radius}`
+ - **Condensation metrics**: `ccp` (Chromatin Condensation Parameter; Sobel edge fraction within nucleus), `condensation_index` (CI; z(P95) - z(log area) using control group)
 
 ### Texture-Based Metrics
 These metrics quantify the spatial arrangement and patterns of pixels within a nucleus, providing insight into chromatin texture (e.g., smooth, coarse, clumped). To ensure that these comparisons are not confounded by absolute brightness, these features are best calculated on data that **has** been subjected to per-nucleus intensity normalization.
@@ -188,6 +189,10 @@ background_correction → intensity_normalization
 ```
 background_correction → per_nucleus_intensity_normalization
 ```
+Notes on normalization and metrics:
+- Texture features (GLCM) are computed on per-nucleus normalized intensities to emphasize pattern over brightness.
+- Intensity distribution metrics including CV, P95, and CI components are computed on non-normalized data.
+- CCP is computed as a percentile-thresholded Sobel edge fraction within each nucleus and uses the non-normalized image; its per-nucleus gradient percentile provides scale robustness.
 
 **Deconvolution Workflow** (enhanced resolution):
 ```

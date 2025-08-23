@@ -34,7 +34,7 @@ nd2_selection_settings:
 
 # ==== BBBC022 VALIDATION SETTINGS ====
 bbbc022_settings:
-  count: 20                     # Number of images to sample for validation
+  count: 40                     # Number of images to sample for validation
   channels: ['OrigHoechst']     # Channels to load (DNA staining)
   seed: 42                      # Random seed for reproducible sampling
   auto_group_split: false       # Set to false to use manual group mapping (automatic not yet implemented)
@@ -90,6 +90,9 @@ feature_extraction:
   radial_shells: 5                # Number of radial shells for spatial analysis
   texture_distance: 1             # Distance for texture analysis (GLCM)
   granulometry_radii: [3, 5, 7, 10, 15]  # Radii for granulometry analysis
+  # Chromatin Condensation Parameter (CCP) settings
+  ccp_percentile_q: 0.90          # Quantile q for gradient threshold within each nucleus (0.80-0.95 typical)
+  ccp_erode_pixels: 1             # Optional erosion (pixels) for computing the gradient threshold set
 
 # ==== PROCESSING SETTINGS ====
 # Preprocessing options for homogeneity analysis
