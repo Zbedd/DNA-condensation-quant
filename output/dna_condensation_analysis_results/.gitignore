@@ -1,0 +1,15 @@
+# Keep only top-level markdown summaries; ignore run subfolders
+# This file works with the repo root .gitignore rules
+
+# Ignore everything by default
+*
+
+# Allow this .gitignore to be tracked
+!.gitignore
+
+# Allow top-level markdown documents
+!*.md
+
+# Ignore any subdirectories (timestamped runs, bbbc022, nd2)
+*/
+**/*

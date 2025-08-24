@@ -56,21 +56,23 @@ class DNACondensationFeatureExtractor:
         self.min_dynamic_range = intensity_config.get('min_dynamic_range', 1e-6)
         self.min_mean_intensity = intensity_config.get('min_mean_intensity', 1e-6)
         self.min_pixel_count = intensity_config.get('min_pixel_count', 10)
-
+        
         # Geometry filtering
         geometry_config = quality_config.get('geometry_filtering', {})
         self.min_perimeter = geometry_config.get('min_perimeter', 4)
-
+        
         # Feature extraction parameters - make configurable
         feature_params = self.config.get('feature_extraction', {})
         self.high_intensity_percentile = feature_params.get('high_intensity_percentile', 90)
         self.radial_shells = feature_params.get('radial_shells', 5)
         self.texture_distance = feature_params.get('texture_distance', 1)
         self.granulometry_radii = feature_params.get('granulometry_radii', [3, 5, 7, 10, 15])
-        # Chromatin Condensation Parameter (CCP) configuration
-        self.ccp_percentile_q = float(feature_params.get('ccp_percentile_q', 0.90))  # quantile in [0,1]
-        self.ccp_erode_pixels = int(feature_params.get('ccp_erode_pixels', 1))       # optional 1px erosion
-        
+        # Numerical stability for ratios (e.g., CV); aligns with README guidance
+        self.epsilon = feature_params.get('epsilon', 1e-8)
+    # Chromatin Condensation Parameter (CCP) config (see nuclear_stain_condensation_metrics.md)
+        self.ccp_percentile = float(feature_params.get('ccp_percentile', 0.90))  # q in [0,1]
+        self.ccp_erode_px = int(feature_params.get('ccp_erode_px', 0))  # optional 1px erosion
+ 
     def extract_features_batch(self, 
                               images: List[np.ndarray], 
                               masks: List[np.ndarray],
@@ -105,7 +107,6 @@ class DNACondensationFeatureExtractor:
             if image is None or mask is None:
                 continue
                 
-            print(f"Processing {name}: {np.max(mask)} nuclei")
             features = self.extract_features_single(image, mask, name, feature_types)
             all_features.append(features)
             
@@ -138,6 +139,10 @@ class DNACondensationFeatureExtractor:
         pd.DataFrame
             DataFrame with one row per nucleus
         """
+        # Compute gradient magnitude once per image for CCP (Sobel on raw I)
+        # Note: this is per spec; CCP should not use per-nucleus normalization.
+        grad_image = sobel(image)
+ 
         # Get region properties
         try:
             regions = measure.regionprops(mask, intensity_image=image)
@@ -166,7 +171,7 @@ class DNACondensationFeatureExtractor:
                     continue
                 
             try:
-                features = self._extract_nucleus_features(region, image, mask, image_name, feature_types)
+                features = self._extract_nucleus_features(region, image, mask, image_name, feature_types, grad_image)
                 
                 # Additional quality check after feature extraction
                 if features is None:
@@ -184,7 +189,8 @@ class DNACondensationFeatureExtractor:
                                  image: np.ndarray,
                                  mask: np.ndarray, 
                                  image_name: str,
-                                 feature_types: Optional[List[str]] = None) -> Dict:
+                                 feature_types: Optional[List[str]] = None,
+                                 grad_image: Optional[np.ndarray] = None) -> Dict:
         """Extract all features for a single nucleus."""
         
         # If feature_types is None, extract all features
@@ -214,12 +220,6 @@ class DNACondensationFeatureExtractor:
         # 1. Intensity Distribution Features
         if 'intensity' in feature_types:
             features.update(self._intensity_features(intensity_values, region))
-            # Add CCP (edge fraction from Sobel gradients) which should be computed on non-normalized data
-            # Uses the same image source as other intensity-based features
-            try:
-                features.update(self._ccp_feature(region))
-            except Exception as e:
-                warnings.warn(f"CCP computation failed for nucleus {region.label} in {image_name}: {e}")
         
         # 2. Morphological Features  
         if 'morphology' in feature_types:
@@ -227,7 +227,7 @@ class DNACondensationFeatureExtractor:
         
         # 3. Spatial/Radial Features
         if 'spatial' in feature_types:
-            features.update(self._radial_features(region, image))
+            features.update(self._radial_features(region, image, grad_image))
         
         # 4. Texture Features
         if 'texture' in feature_types:
@@ -259,106 +259,57 @@ class DNACondensationFeatureExtractor:
         std_intensity = np.std(intensity_values)
         total_intensity = np.sum(intensity_values)
         
-        eps = 1e-8
         features = {
             'mean_intensity': mean_intensity,
             'std_intensity': std_intensity,
-            # Coefficient of variation - key metric for homogeneity analysis
-            'coefficient_of_variation': float(std_intensity / (mean_intensity + eps)),
+            # Coefficient of variation - computed on pre-normalized intensities with epsilon
+            'coefficient_of_variation': std_intensity / (mean_intensity + self.epsilon),
             # Nuclear density - captures chromatin compaction (mean intensity * area / total intensity)
             'nuclear_density': (
                 (mean_intensity * getattr(region, 'area', 1) / total_intensity)
                 if (total_intensity > 0 and region is not None)
                 else mean_intensity
             ),
-            'min_intensity': np.min(intensity_values),
-            'max_intensity': np.max(intensity_values),
-            'intensity_range': np.max(intensity_values) - np.min(intensity_values),
+            'min_intensity': float(np.min(intensity_values)),
+            'max_intensity': float(np.max(intensity_values)),
+            'intensity_range': float(np.max(intensity_values) - np.min(intensity_values)),
         }
         
         # Percentile-based features for robust distribution characterization
         percentiles = [10, 25, 50, 75, 90, 95, 99]
         for p in percentiles:
-            features[f'intensity_p{p}'] = np.percentile(intensity_values, p)
+            features[f'intensity_p{p}'] = float(np.percentile(intensity_values, p))
         
         # High intensity fraction - indicates proportion of bright chromatin
         high_threshold = np.percentile(intensity_values, self.high_intensity_percentile)
-        features['high_intensity_fraction'] = np.mean(intensity_values >= high_threshold)
+        features['high_intensity_fraction'] = float(np.mean(intensity_values >= high_threshold))
+
+    # CI (Condensation Index) is computed centrally in batch_processor after analysis
         
         # Distribution shape characteristics - with robustness checks
         from scipy.stats import skew, kurtosis
-
-        # Check for sufficient variance to avoid catastrophic cancellation
-        intensity_variance = np.var(intensity_values)
-        intensity_std = np.std(intensity_values)
-        cv = float(intensity_std / (mean_intensity + eps))
         
-        # Only calculate skewness/kurtosis if we have sufficient variance
-        # CV < 0.01 indicates nearly uniform data that will cause numerical issues
+        # Use CV to gate higher-order moments to avoid numerical instability
+        cv = std_intensity / (mean_intensity + self.epsilon)
         if cv > 0.01 and len(intensity_values) > 10:
             try:
-                features['intensity_skewness'] = skew(intensity_values)  # Asymmetry of distribution
-                features['intensity_kurtosis'] = kurtosis(intensity_values)  # Tail heaviness
-            except (RuntimeWarning, ValueError):
-                # Fallback for numerical issues
+                features['intensity_skewness'] = float(skew(intensity_values))
+                features['intensity_kurtosis'] = float(kurtosis(intensity_values))
+            except Exception:
                 features['intensity_skewness'] = 0.0
                 features['intensity_kurtosis'] = 0.0
         else:
-            # Set to neutral values for uniform regions
             features['intensity_skewness'] = 0.0
             features['intensity_kurtosis'] = 0.0
         
         # Entropy quantifies intensity variability (higher = more disordered)
         hist, _ = np.histogram(intensity_values, bins=256)
-        hist = hist / np.sum(hist)  # Normalize to probabilities
-        features['intensity_entropy'] = entropy(hist + 1e-10)  # Small constant prevents log(0)
+        total = float(np.sum(hist))
+        if total > 0:
+            hist = hist / total  # Normalize to probabilities
+        features['intensity_entropy'] = float(entropy(hist + 1e-10))  # Small constant prevents log(0)
         
         return features
-
-    def _ccp_feature(self, region) -> Dict:
-        """Compute Chromatin Condensation Parameter (CCP) as edge fraction.
-
-        Steps per nucleus:
-          1) Compute Sobel gradient magnitude on the nucleus intensity image.
-          2) Compute a per-nucleus gradient threshold as q-quantile within an eroded mask (optional).
-          3) Return fraction of nucleus pixels with gradient >= threshold.
-
-        Returns a dict with key 'ccp'.
-        """
-        nucleus_image = region.intensity_image
-        if getattr(nucleus_image, 'ndim', 2) == 3:
-            nucleus_image = np.mean(nucleus_image, axis=-1)
-        nucleus_mask = region.image.astype(bool)
-
-        # Gradient magnitude via Sobel (skimage.filters.sobel returns magnitude-like response)
-        # Convert to float for stable gradients
-        grad = sobel(nucleus_image.astype(np.float32))
-
-        # Erode mask by configured pixels to avoid border artifacts in thresholding set
-        if self.ccp_erode_pixels > 0:
-            try:
-                eroded = ndimage.binary_erosion(nucleus_mask, iterations=int(self.ccp_erode_pixels))
-                if not np.any(eroded):
-                    eroded = nucleus_mask  # fallback if erosion removes all pixels
-            except Exception:
-                eroded = nucleus_mask
-        else:
-            eroded = nucleus_mask
-
-        # Compute per-nucleus quantile threshold
-        vals = grad[eroded]
-        if vals.size == 0:
-            return {'ccp': 0.0}
-        q = float(np.clip(self.ccp_percentile_q, 0.0, 1.0))
-        tau = np.quantile(vals, q)
-
-        # Count edge pixels within the full nucleus mask
-        edges = (grad >= tau) & nucleus_mask
-        area = float(nucleus_mask.sum())
-        if area <= 0:
-            return {'ccp': 0.0}
-        ccp = float(edges.sum() / area)
-        return {'ccp': ccp}
     
     def _morphological_features(self, region) -> Dict:
         """
@@ -393,13 +344,15 @@ class DNACondensationFeatureExtractor:
             'circularity': 4 * np.pi * region.area / (region.perimeter ** 2) if region.perimeter > 0 else 0,  # Nuclear compactness: 1=perfect circle, increases with condensation
         }
     
-    def _radial_features(self, region, image: np.ndarray) -> Dict:
+    def _radial_features(self, region, image: np.ndarray, grad_image: Optional[np.ndarray] = None) -> Dict:
         """
         Extract radial intensity profile features to quantify spatial organization.
         
         Creates concentric shells from nucleus center to edge and measures
         average intensity in each shell. Useful for detecting center-to-edge
         intensity gradients that indicate chromatin condensation patterns.
+        Also computes CCP (chromatin condensation parameter) as the fraction of
+        pixels within the nucleus whose Sobel gradient magnitude exceeds a per-nucleus percentile.
         
         Returns:
             Dictionary with mean intensity for each radial shell plus 
@@ -450,6 +403,37 @@ class DNACondensationFeatureExtractor:
                 center_intensity / edge_intensity if edge_intensity > 0 else 0
             )
         
+        # CCP: edge fraction using per-nucleus percentile threshold on Sobel gradient
+        try:
+            if grad_image is not None:
+                # Crop gradient to region bbox
+                minr, minc, maxr, maxc = region.bbox
+                G_patch = grad_image[minr:maxr, minc:maxc]
+                nucleus_mask = region.image.astype(bool)
+                if self.ccp_erode_px > 0:
+                    # Optional erosion to avoid boundary artifacts
+                    eroded_mask = ndimage.binary_erosion(nucleus_mask, iterations=int(self.ccp_erode_px))
+                else:
+                    eroded_mask = nucleus_mask
+                # If erosion removes everything, fall back to original mask
+                if not eroded_mask.any():
+                    eroded_mask = nucleus_mask
+                # Percentile threshold within the (optionally eroded) nucleus mask
+                vals = G_patch[eroded_mask]
+                if vals.size >= 1:
+                    q = float(np.quantile(vals, self.ccp_percentile))
+                    area = int(nucleus_mask.sum())
+                    if area > 0:
+                        edge_count = int((G_patch[nucleus_mask] >= q).sum())
+                        shell_means['ccp'] = edge_count / float(area)
+                    else:
+                        shell_means['ccp'] = 0.0
+                else:
+                    shell_means['ccp'] = 0.0
+        except Exception as e:
+            warnings.warn(f"CCP computation failed for nucleus {region.label}: {e}")
+            shell_means['ccp'] = 0.0
+ 
         return shell_means
     
     def _texture_features(self, region) -> Dict:

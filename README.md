@@ -118,7 +118,7 @@ This pipeline extracts a comprehensive set of features to quantify nuclear chang
 ### Intensity-Based Metrics
 These metrics directly measure the amount and distribution of the fluorescence signal. They are sensitive to absolute intensity levels and are calculated on **globally preprocessed** data (background corrected, globally normalized) that has **not** undergone per-nucleus normalization. This preserves relative intensity differences between nuclei for valid experimental comparisons.
 
-- **Statistical Measures**: `mean_intensity`, `std_intensity`, `coefficient_of_variation` (CV), `min_intensity`, `max_intensity`, `intensity_range`
+- **Statistical Measures**: `mean_intensity`, `std_intensity`, `coefficient_of_variation`, `min_intensity`, `max_intensity`, `intensity_range`
 - **Distribution Shape**: `intensity_skewness`, `intensity_kurtosis`, `intensity_entropy`
 - **Percentile-Based**: `intensity_p{10, 25, 50, 75, 90, 95, 99}`, `high_intensity_fraction`
 - **Derived Intensity**: `nuclear_density`
@@ -195,10 +195,6 @@ background_correction → intensity_normalization
 ```
 background_correction → per_nucleus_intensity_normalization
 ```
-Notes on normalization and metrics:
-- Texture features (GLCM) are computed on per-nucleus normalized intensities to emphasize pattern over brightness.
-- Intensity distribution metrics including CV, P95, and CI components are computed on non-normalized data.
-- CCP is computed as a percentile-thresholded Sobel edge fraction within each nucleus and uses the non-normalized image; its per-nucleus gradient percentile provides scale robustness.
 
 **Deconvolution Workflow** (enhanced resolution):
 ```

@@ -487,7 +487,8 @@ def per_nucleus_intensity_normalization(image: np.ndarray,
     nucleus_ids = nucleus_ids[nucleus_ids > 0]
     
     if verbose:
-        print(f"Processing {len(nucleus_ids)} nuclei for per-nucleus normalization")
+        # Keep concise; omit detailed counts per user request
+        pass
     
     processed_count = 0
     skipped_count = 0

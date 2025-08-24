@@ -31,6 +31,9 @@ nd2_selection_settings:
   seed: 42                       # Seed for reproducible balanced random sampling
   nuclear_channel_index: 1       # Expected 1 where channel 0 = GFP, channel 1 = DNA
   # Note: Always uses balanced random sampling - equal representation across ID+name groups
+  # Controls definition for CI reference calculations
+  control_group_column: condition  # Column in all_features.csv with group labels
+  control_conditions: ["gfpOnly"]         # e.g., ["wtLSD1", "gfpOnly"]
 
 # ==== BBBC022 VALIDATION SETTINGS ====
 bbbc022_settings:
@@ -40,10 +43,14 @@ bbbc022_settings:
   auto_group_split: false       # Set to false to use manual group mapping (automatic not yet implemented)
   nuclear_channel_index: 0      # BBBC022 images are single-channel (use 0)
   # Compounds considered as DNA-condensation-inducing treatments for grouping (case-insensitive substring match)
-  treatment_compounds:
+  treatment_compounds: 
     - "staurosporine"
     - "camptothecin"
     - "10-hydroxycamptothecin"
+  # Controls definition for CI reference calculations
+  control_group_column: condition  # Column in all_features.csv with group labels
+  control_conditions: ["control"]         # e.g., ["control", "DMSO"]
+
 
 # ==== SEGMENTATION SETTINGS ====
 # Segmentation method: 'yolo' (AI-based) or 'watershed' (traditional image processing)
@@ -90,9 +97,15 @@ feature_extraction:
   radial_shells: 5                # Number of radial shells for spatial analysis
   texture_distance: 1             # Distance for texture analysis (GLCM)
   granulometry_radii: [3, 5, 7, 10, 15]  # Radii for granulometry analysis
-  # Chromatin Condensation Parameter (CCP) settings
-  ccp_percentile_q: 0.90          # Quantile q for gradient threshold within each nucleus (0.80-0.95 typical)
-  ccp_erode_pixels: 1             # Optional erosion (pixels) for computing the gradient threshold set
+  # Optional reference statistics for Condensation Index (CI); if provided, CI will be computed
+  # These must be derived from control nuclei only, using the same units as your data (pixels unless converted)
+  # See nuclear_stain_condensation_metrics.md for definitions
+  ci_reference:
+    mu_P95: null      # mean of per-nucleus P95 intensity over controls
+    sigma_P95: null   # std of per-nucleus P95 intensity over controls
+    mu_logA: null     # mean of log(area) over controls
+    sigma_logA: null  # std of log(area) over controls
+    
 
 # ==== PROCESSING SETTINGS ====
 # Preprocessing options for homogeneity analysis

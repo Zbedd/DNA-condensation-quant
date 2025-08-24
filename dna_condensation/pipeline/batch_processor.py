@@ -105,10 +105,12 @@ def main(return_images=False, skip_validation=False):
   # Input-specific preparation - only loads/prepares raw images and metadata
   if input_source == "nd2":
     raw_images, image_names, metadata = prepare_nd2_inputs()
-    output_dir = Path(config.get("nd2_output_path", "./output"))
+    # Unified output root under repository 'output' directory
+    output_dir = project_root / "output"
   elif input_source == "bbbc022":
     raw_images, image_names, metadata = prepare_bbbc022_inputs()
-    output_dir = Path(config.get("validation_output_path", "dna_condensation/validation/output"))
+    # Unified output root under repository 'output' directory
+    output_dir = project_root / "output"
   else:
     raise ValueError(f"Invalid input_source '{input_source}'. Must be 'nd2' or 'bbbc022'.")
   
@@ -367,14 +369,15 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
   print("RUNNING DNA CONDENSATION ANALYSIS")
   print("="*60)
   
-  # Prepare timestamped output directory structure
+  # Prepare standardized output directory structure:
+  # <repo>/output/dna_condensation_analysis_results/<input_source>/<timestamp>
   output_dir = Path(output_dir)
-  root_output = output_dir / "dna_condensation_analysis_results"
+  root_output = output_dir / "dna_condensation_analysis_results" / str(input_source)
   root_output.mkdir(parents=True, exist_ok=True)
   
   # Create unique timestamped subfolder for this analysis run
   ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-  run_output = root_output / f"{input_source}_{ts}"
+  run_output = root_output / ts
   run_output.mkdir(parents=True, exist_ok=True)
   
   # Archive current configuration for reproducibility
@@ -463,7 +466,10 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
       _fe.extract_experimental_metadata = _orig_extract
     if callable(_orig_ap_extract):
       _ap.extract_experimental_metadata = _orig_ap_extract
-    
+
+    # Compute control-based Condensation Index (CI) and persist references (fail-fast on error)
+    _compute_ci_reference_and_apply(run_output=run_output, source=input_source, timestamp=ts)
+
     # Generate single-metric significance plots if configured
     plot_config = config.get("plot", {})
     single_metric_config = plot_config.get("single_metric_plot", {})
@@ -514,7 +520,11 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
             numeric_cols = features_df.select_dtypes(include=['number']).columns.tolist()
             metrics_to_plot = [c for c in numeric_cols if c not in exclude_cols]
 
-        # Filter out any metrics not present in features_df
+        # Always ensure CI appears if available
+        if 'condensation_index' in features_df.columns and 'condensation_index' not in metrics_to_plot:
+          metrics_to_plot.append('condensation_index')
+
+        # Filter out any metrics not present in features_df (after CI insertion)
         metrics_to_plot = [m for m in metrics_to_plot if m in features_df.columns]
         metrics_to_plot = sorted(dict.fromkeys(metrics_to_plot))  # de-duplicate & sort
 
@@ -525,7 +535,7 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
           print(f"\n📊 Creating standalone plot(s) for {len(metrics_to_plot)} metric(s)...")
           
           # Use the same aggregation setting as statistical analysis for consistency
-          use_image_aggregation_plots = config.get("analysis_settings", {}).get("use_image_aggregation", True)
+          use_image_aggregation_plots = config.get("statistical_analysis", {}).get("use_image_aggregation", True)
 
           # Check for sufficient data for image-level aggregation ONCE before the loop
           if use_image_aggregation_plots:
@@ -554,6 +564,22 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
         print("  Check that metric names are valid or leave as null to auto-discover.")
     else:
       print("📊 Single metric plot disabled in config")
+
+    # Always create a compact grid of key metrics next to all_features.csv
+    try:
+      import pandas as pd
+      from dna_condensation.visualization.visualize_statistics import StatisticalVisualizer
+      features_df = pd.read_csv(run_output / "all_features.csv")
+      vis = StatisticalVisualizer()
+      vis.plot_key_metrics_grid(
+        df=features_df,
+        group_column='condition',
+        save_path=run_output / 'key_metrics.png',
+        use_image_aggregation=config.get('statistical_analysis', {}).get('use_image_aggregation', True)
+      )
+      print(f"📈 Saved key metrics grid to: {run_output / 'key_metrics.png'}")
+    except Exception as e:
+      print(f"✗ Failed to create key metrics grid: {e}")
 
     # Create nuclei panel if configured
     nuclei_cfg = plot_config.get("nuclei_panel", {})
@@ -595,5 +621,125 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
     print("Continuing with basic processing...")
 
 
+
+def _compute_ci_reference_and_apply(run_output: Path, source: str, timestamp: str) -> None:
+  """Compute control-based CI references from all_features.csv and write 'condensation_index'.
+
+  Fail-fast rules:
+  - Missing grouping metadata or control conditions -> SystemExit with ERR_MISSING_GROUPING_METADATA
+  - Control filter selects none or all rows -> SystemExit with ERR_CONTROL_FILTER_NOT_RESTRICTIVE
+  - Fewer than 2 control nuclei -> SystemExit with ERR_INSUFFICIENT_CONTROL_SAMPLES
+  - Missing required feature columns -> SystemExit with ERR_MISSING_FEATURES
+  - Zero/NaN variance in control distributions -> SystemExit with ERR_ZERO_VARIANCE
+  """
+  import json
+  import pandas as pd
+  import numpy as np
+
+  features_path = run_output / 'all_features.csv'
+  if not features_path.exists():
+    raise SystemExit("ERR_MISSING_FEATURES: all_features.csv not found; cannot compute condensation index")
+
+  df = pd.read_csv(features_path)
+
+  # Select settings by source
+  settings_key = 'nd2_selection_settings' if str(source).lower() == 'nd2' else 'bbbc022_settings'
+  from dna_condensation.pipeline.config import config
+  sel_cfg = config.get(settings_key, {})
+  group_col = sel_cfg.get('control_group_column')
+  control_conditions = sel_cfg.get('control_conditions')
+
+  if not group_col or not isinstance(group_col, str):
+    raise SystemExit(
+      "ERR_MISSING_GROUPING_METADATA: 'control_group_column' missing/invalid. "
+      "Action: Set a valid column name (e.g., 'condition') under {settings_key} in config.yaml"
+    )
+  if control_conditions is None or not isinstance(control_conditions, (list, tuple)) or len(control_conditions) == 0:
+    raise SystemExit(
+      "ERR_MISSING_GROUPING_METADATA: 'control_conditions' missing or empty. "
+      "Action: Provide a non-empty list of control labels under {settings_key}.e.g., ['control','DMSO']"
+    )
+  if group_col not in df.columns:
+    raise SystemExit(
+      f"ERR_MISSING_GROUPING_METADATA: required column '{group_col}' not found in all_features.csv. "
+      f"Found: {sorted(df.columns.tolist())[:20]}..."
+    )
+
+  required_cols = ['intensity_p95', 'area']
+  missing = [c for c in required_cols if c not in df.columns]
+  if missing:
+    raise SystemExit(
+      f"ERR_MISSING_FEATURES: required columns not found: {missing}. "
+      "Action: Ensure intensity_p95 and area are produced during feature extraction."
+    )
+
+  n_total = len(df)
+  df_ctrl = df[df[group_col].isin(control_conditions)].copy()
+  n_ctrl = len(df_ctrl)
+
+  # Report control subset reduction for CI reference size
+  print(
+    f"CI control reference selection: {n_ctrl} of {n_total} nuclei matched {group_col} in {list(control_conditions)}"
+  )
+
+  if n_ctrl == 0 or n_ctrl >= n_total:
+    raise SystemExit(
+      f"ERR_CONTROL_FILTER_NOT_RESTRICTIVE: control filter selected {n_ctrl} of {n_total} rows. "
+      f"Group column: {group_col}; Conditions: {control_conditions}. "
+      "Action: Fix control conditions to select a true subset."
+    )
+  if n_ctrl < 2:
+    raise SystemExit(
+      f"ERR_INSUFFICIENT_CONTROL_SAMPLES: need >=2 control nuclei, found {n_ctrl}. "
+      "Action: Increase data or broaden control selection."
+    )
+
+  # Compute references (sample mean/stdev with ddof=1)
+  mu_p95 = float(df_ctrl['intensity_p95'].mean())
+  sd_p95 = float(df_ctrl['intensity_p95'].std(ddof=1))
+  logA = np.log(df_ctrl['area'].astype(float).clip(lower=1e-9))
+  mu_logA = float(logA.mean())
+  sd_logA = float(logA.std(ddof=1))
+
+  if not np.isfinite(sd_p95) or sd_p95 <= 0:
+    raise SystemExit(
+      f"ERR_ZERO_VARIANCE: sigma_P95 is {sd_p95}. "
+      "Action: Verify control selection and that 'intensity_p95' varies across nuclei."
+    )
+  if not np.isfinite(sd_logA) or sd_logA <= 0:
+    raise SystemExit(
+      f"ERR_ZERO_VARIANCE: sigma_logA is {sd_logA}. "
+      "Action: Verify control selection and that 'area' varies across nuclei."
+    )
+
+  # Apply CI to all rows
+  df_all = df.copy()
+  z_p95 = (df_all['intensity_p95'].astype(float) - mu_p95) / sd_p95
+  z_logA = (np.log(df_all['area'].astype(float).clip(lower=1e-9)) - mu_logA) / sd_logA
+  df_all['condensation_index'] = z_p95 - z_logA
+
+  # Persist back to CSV
+  df_all.to_csv(features_path, index=False)
+
+  # Save reference JSON for reproducibility
+  ref = {
+    'mu_P95': mu_p95,
+    'sigma_P95': sd_p95,
+    'mu_logA': mu_logA,
+    'sigma_logA': sd_logA,
+    'n_control': int(n_ctrl),
+    'n_total': int(n_total),
+    'group_column': group_col,
+    'control_conditions': list(control_conditions),
+    'source': str(source),
+    'timestamp': timestamp,
+  }
+  with open(run_output / f"ci_reference_{timestamp}.json", 'w', encoding='utf-8') as f:
+    json.dump(ref, f, indent=2)
+
+  print("✓ Condensation Index computed and saved; reference saved to ci_reference_*.json")
+
 if __name__ == "__main__":
   main()
+
+

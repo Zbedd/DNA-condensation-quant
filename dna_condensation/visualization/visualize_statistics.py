@@ -351,12 +351,18 @@ class StatisticalVisualizer:
         ax.set_xticklabels([f'Shell {i}' for i in range(len(available_radial))])
         ax.legend()
         ax.grid(True, alpha=0.3)
-        
+
+        # Give a bit more headroom on the y-axis to avoid clipping
+        ymin, ymax = ax.get_ylim()
+        yr = max(ymax - ymin, 1e-6)
+        ax.set_ylim(ymin, ymax + 0.25 * yr)
+        ax.margins(x=0.05)
+
         plt.tight_layout()
-        
+
         if save_path:
             plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
-            
+
         return fig
     
     def create_comprehensive_report(self, df: pd.DataFrame,
@@ -588,8 +594,8 @@ class StatisticalVisualizer:
 
         # Create violin plots with individual points
         parts = ax.violinplot([plot_data[plot_data[group_column] == group][metric].values 
-                              for group in groups], 
-                             positions=range(len(groups)), showmeans=True, showmedians=True)
+                               for group in groups], 
+                              positions=range(len(groups)), showmeans=True, showmedians=True)
 
         # Color the violin plots
         colors = sns.color_palette("husl", n_groups)
@@ -609,8 +615,8 @@ class StatisticalVisualizer:
                 image_data = df_image[df_image[group_column] == group]['value'].values
                 x_jitter_images = np.random.normal(i, 0.15, len(image_data))
                 ax.scatter(x_jitter_images, image_data, alpha=0.8, s=60, color='black', 
-                          edgecolor=colors[i], linewidth=2, marker='D', 
-                          label='image medians' if i == 0 else "")
+                           edgecolor=colors[i], linewidth=2, marker='D', 
+                           label='image medians' if i == 0 else "")
 
         # Prepare data for statistical testing
         if use_image_level:
@@ -683,20 +689,31 @@ class StatisticalVisualizer:
                 
                 pairwise_data = pairwise_info
 
-        # Add significance bars using corrected results
+        # Add significance bars using corrected results (drawn lower to avoid top overlap)
         y_max = plot_data[metric].max()
         y_min = plot_data[metric].min()
         y_range = max(y_max - y_min, 1e-6)
-        bar_height = y_max + 0.05 * y_range
-        sig_height_increment = 0.08 * y_range
+        bar_height = y_max + 0.01 * y_range
+        sig_height_increment = 0.04 * y_range
         current_height = bar_height
-        
+
         for result in pairwise_data:
             if result['significant']:
                 pos1, pos2 = result['positions']
-                ax.plot([pos1, pos1, pos2, pos2], 
-                        [current_height - sig_height_increment/3, current_height, current_height, current_height - sig_height_increment/3], 
-                        'k-', linewidth=1.5)
+                # Add slight horizontal padding so brackets don't touch the points
+                left = pos1 + 0.05
+                right = pos2 - 0.05
+                ax.plot(
+                    [left, left, right, right],
+                    [
+                        current_height - sig_height_increment / 4,
+                        current_height,
+                        current_height,
+                        current_height - sig_height_increment / 4,
+                    ],
+                    'k-',
+                    linewidth=2.0,
+                )
                 if result['p_corrected'] < 0.001:
                     sig_text = '***'
                 elif result['p_corrected'] < 0.01:
@@ -705,8 +722,15 @@ class StatisticalVisualizer:
                     sig_text = '*'
                 else:
                     sig_text = 'ns'
-                ax.text((pos1 + pos2) / 2, current_height + sig_height_increment/4, sig_text, 
-                        ha='center', va='bottom', fontweight='bold', fontsize=12)
+                ax.text(
+                    (pos1 + pos2) / 2,
+                    current_height + sig_height_increment / 5,
+                    sig_text,
+                    ha='center',
+                    va='bottom',
+                    fontweight='bold',
+                    fontsize=16,
+                )
                 current_height += sig_height_increment
 
         # Add legend if image-level data is shown
@@ -731,17 +755,18 @@ class StatisticalVisualizer:
         # Customize plot and annotations
         ax.set_xticks(range(len(groups)))
         ax.set_xticklabels(groups, rotation=45, ha='right')
-        ax.set_xlabel('Experimental Groups', fontsize=12, fontweight='bold')
+        ax.tick_params(axis='x', labelsize=11)
+        ax.set_xlabel('Experimental Groups', fontsize=13, fontweight='bold')
         if ylabel:
-            ax.set_ylabel(ylabel, fontsize=12, fontweight='bold')
+            ax.set_ylabel(ylabel, fontsize=13, fontweight='bold')
         else:
             clean_metric = metric.replace('_', ' ').title()
-            ax.set_ylabel(clean_metric, fontsize=12, fontweight='bold')
+            ax.set_ylabel(clean_metric, fontsize=13, fontweight='bold')
         if title:
-            ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+            ax.set_title(title, fontsize=16, fontweight='bold', pad=20)
         else:
             clean_metric = metric.replace('_', ' ').title()
-            ax.set_title(f'{clean_metric} Across Experimental Groups', fontsize=14, fontweight='bold', pad=20)
+            ax.set_title(f'{clean_metric} Across Experimental Groups', fontsize=16, fontweight='bold', pad=20)
 
         # Add statistical test results to the plot
         if (kw_p is None) or np.isnan(kw_p):
@@ -768,9 +793,17 @@ class StatisticalVisualizer:
         ax.text(0.02, 0.02, '\n'.join(sample_text), transform=ax.transAxes, fontsize=9,
                 verticalalignment='bottom', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
 
-        # Adjust y-axis limits to accommodate significance bars
-        if pairwise_data and any(r['significant'] for r in pairwise_data):
-            ax.set_ylim(bottom=y_min - 0.05 * y_range, top=current_height + 0.1 * y_range)
+        # Adjust y-axis limits to accommodate significance bars and add extra headroom
+        had_sig = bool(pairwise_data) and any(r['significant'] for r in pairwise_data)
+        if had_sig:
+            y_top_text = current_height + sig_height_increment/4
+            ax.set_ylim(bottom=y_min - 0.05 * y_range, top=y_top_text + 0.30 * y_range)
+        else:
+            ymin_ax, ymax_ax = ax.get_ylim()
+            yr_ax = max(ymax_ax - ymin_ax, 1e-6)
+            ax.set_ylim(ymin_ax, ymax_ax + 0.15 * yr_ax)
+        # Horizontal breathing room for brackets/points
+        ax.margins(x=0.12)
 
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -778,4 +811,203 @@ class StatisticalVisualizer:
             plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
             print(f"Saved single metric plot to {save_path}")
             plt.close(fig)  # Prevent too many open figures in batch mode
+        return fig
+
+    def _plot_single_metric_on_ax(self, df: pd.DataFrame, metric: str, ax, group_column: str = 'condition',
+                                   use_image_aggregation: bool = True) -> None:
+        """Render a simplified single-metric violin + jitter plot into a provided Axes.
+
+        - Shows per-nucleus distributions by group (violin + jitter points)
+        - Overlays image-level medians as black diamonds when aggregation is feasible
+        - No significance bars/text (kept compact for grid usage)
+        """
+        if metric not in df.columns:
+            ax.text(0.5, 0.5, f"Missing metric: {metric}", ha='center', va='center', transform=ax.transAxes)
+            ax.set_axis_off()
+            return
+
+        plot_data = df[[metric, group_column, 'image_name']].dropna()
+        if plot_data.empty:
+            ax.text(0.5, 0.5, f"No data: {metric}", ha='center', va='center', transform=ax.transAxes)
+            ax.set_axis_off()
+            return
+
+        groups = sorted(plot_data[group_column].unique().tolist())
+
+        # Build violin
+        parts = ax.violinplot([plot_data[plot_data[group_column] == g][metric].values for g in groups],
+                               positions=range(len(groups)), showmeans=True, showmedians=True)
+        colors = sns.color_palette("husl", len(groups))
+        for i, pc in enumerate(parts['bodies']):
+            pc.set_facecolor(colors[i])
+            pc.set_alpha(0.7)
+
+        # Jittered points (per nucleus)
+        rng = np.random.default_rng(42)
+        for i, g in enumerate(groups):
+            vals = plot_data[plot_data[group_column] == g][metric].values
+            if len(vals) == 0:
+                continue
+            x = rng.normal(i, 0.05, size=len(vals))
+            ax.scatter(x, vals, s=12, alpha=0.35, color=colors[i], edgecolor='white', linewidth=0.3)
+
+        # Overlay image-level medians if feasible
+        if use_image_aggregation:
+            df_image = self._aggregate_by_replicate(df, metric, group_column=group_column,
+                                                    replicate_column='image_name', agg='median', min_nuclei=1)
+            if df_image is not None and not df_image.empty:
+                n_images = df_image.groupby(group_column)['image_name'].nunique()
+                if len(n_images) >= 2 and (n_images >= 2).all():
+                    for i, g in enumerate(groups):
+                        vals = df_image[df_image[group_column] == g]['value'].values
+                        if len(vals) == 0:
+                            continue
+                        x = rng.normal(i, 0.15, size=len(vals))
+                        ax.scatter(x, vals, s=45, alpha=0.9, color='black', edgecolor=colors[i], linewidth=1.5, marker='D')
+
+        ax.set_xticks(range(len(groups)))
+        ax.set_xticklabels(groups, rotation=30, ha='right')
+        ax.tick_params(axis='x', labelsize=11)
+        ax.grid(True, axis='y', alpha=0.2)
+
+        # Add extra headroom to avoid markers/brackets touching borders
+        ymin, ymax = ax.get_ylim()
+        yr = max(ymax - ymin, 1e-6)
+        ax.set_ylim(ymin, ymax + 0.15 * yr)
+        ax.margins(x=0.10)
+
+    def plot_key_metrics_grid(self, df: pd.DataFrame, group_column: str = 'condition',
+                               save_path: Optional[Path] = None,
+                               use_image_aggregation: bool = True) -> plt.Figure:
+        """Create a 4x2 grid of key metrics with compact significance indicators.
+
+        Layout (4 columns x 2 rows):
+          - Top-left (0,0): annotation panel only
+          - Remaining panels: metrics
+
+        Metrics shown (same as before):
+          CI (condensation_index), Area, P95 (intensity_p95), CCP (ccp), CV (coefficient_of_variation)
+
+        Confidence indicators:
+          - If exactly two groups are present for a metric, add a compact bracket with significance stars
+            computed like in single_metric plots (image-level medians when feasible, else per-nucleus)
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.gridspec import GridSpec
+        from scipy.stats import mannwhitneyu
+        import numpy as np
+
+    # Helper to add compact significance star for two-group comparison
+        def _add_compact_sig(ax, data: pd.DataFrame, metric: str):
+            sub = data[[metric, group_column, 'image_name']].dropna()
+            groups = sorted(sub[group_column].unique().tolist())
+            if len(groups) != 2:
+                return  # Only render compact indicator for two-group cases
+
+            # Prefer image-level aggregation if feasible
+            use_image_level = False
+            df_img = None
+            if use_image_aggregation:
+                df_img = self._aggregate_by_replicate(sub, metric, group_column=group_column,
+                                                      replicate_column='image_name', agg='median', min_nuclei=1)
+                if df_img is not None and not df_img.empty:
+                    n_images = df_img.groupby(group_column)['image_name'].nunique()
+                    if len(n_images) == 2 and (n_images >= 2).all():
+                        use_image_level = True
+
+            if use_image_level:
+                g1_vals = df_img[df_img[group_column] == groups[0]]['value'].values
+                g2_vals = df_img[df_img[group_column] == groups[1]]['value'].values
+            else:
+                g1_vals = sub[sub[group_column] == groups[0]][metric].values
+                g2_vals = sub[sub[group_column] == groups[1]][metric].values
+
+            # Guard against degenerate data
+            if len(g1_vals) == 0 or len(g2_vals) == 0:
+                return
+            if (np.nanstd(g1_vals) == 0 and np.nanstd(g2_vals) == 0 and
+                np.nanmean(g1_vals) == np.nanmean(g2_vals)):
+                return
+
+            try:
+                stat, p_val = mannwhitneyu(g1_vals, g2_vals, alternative='two-sided')
+            except Exception:
+                return
+
+            # Do not draw anything for non-significant (ns) results
+            if not np.isfinite(p_val) or p_val >= 0.05:
+                return
+
+            # Map p to stars (significant cases only)
+            if p_val < 0.001:
+                stars = '***'
+            elif p_val < 0.01:
+                stars = '**'
+            else:
+                stars = '*'
+
+            # Draw a compact bracket between positions 0 and 1
+            y_min, y_max = ax.get_ylim()
+            y_range = max(y_max - y_min, 1e-6)
+            base = y_max - 0.12 * y_range
+            height = y_max - 0.10 * y_range
+            ax.plot([0, 0, 1, 1], [base, height, height, base], 'k-', linewidth=1)
+            ax.text(0.5, height + 0.005 * y_range, stars, ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+        # Metrics to display (titles kept short)
+        metrics = [
+            ("condensation_index", "CI"),
+            ("area", "Area"),
+            ("intensity_p95", "P95"),
+            ("ccp", "CCP"),
+            ("coefficient_of_variation", "CV"),
+        ]
+
+        fig = plt.figure(figsize=(20, 10), dpi=self.dpi)
+        gs = GridSpec(2, 4, figure=fig, wspace=0.35, hspace=0.45)
+
+        # Annotation panels: top-left and bottom-left
+        ax_ann_top = fig.add_subplot(gs[0, 0])
+        ax_ann_top.axis('off')
+        ax_ann_top.text(
+            0.0, 1.0,
+            'Cell death indicators:\n'
+            '  ↑ CI\n'
+            '  ↓ Area\n'
+            '  ↑ P95',
+            ha='left', va='top', fontsize=16, fontweight='bold', transform=ax_ann_top.transAxes
+        )
+
+        ax_ann_bottom = fig.add_subplot(gs[1, 0])
+        ax_ann_bottom.axis('off')
+        ax_ann_bottom.text(
+            0.0, 1.0,
+            'DNA condensation indicators:\n'
+            '  ↑ CCP\n'
+            '  ↑ CV\n'
+            '  ↑ P95',
+            ha='left', va='top', fontsize=16, fontweight='bold', transform=ax_ann_bottom.transAxes
+        )
+
+        # Explicit metric placement
+        placement = {
+            (0, 1): ("condensation_index", "CI"),
+            (0, 2): ("area", "Area"),
+            (0, 3): ("intensity_p95", "P95"),
+            (1, 1): ("ccp", "CCP"),            # move to 2nd col
+            (1, 2): ("coefficient_of_variation", "CV"),  # move to 3rd col
+            (1, 3): ("intensity_p95", "P95"),  # duplicate P95 bottom-right
+        }
+
+        for (r, c), (metric, title) in placement.items():
+            ax = fig.add_subplot(gs[r, c])
+            self._plot_single_metric_on_ax(df, metric, ax, group_column, use_image_aggregation)
+            ax.set_title(title, fontsize=13, fontweight='bold')
+            _add_compact_sig(ax, df, metric)
+
+        if save_path is not None:
+            try:
+                fig.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            except Exception as _:
+                pass
         return fig
