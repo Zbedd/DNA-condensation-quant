@@ -215,9 +215,16 @@ marimo/_lsp/
 __marimo__/
 
 # Project outputs (do not commit run artifacts)
-dna_condensation_analysis_results/
 output/
 temp/
+
+# Keep only the results root and summary markdowns under output/dna_condensation_analysis_results
+!output/dna_condensation_analysis_results/
+!output/dna_condensation_analysis_results/.gitignore
+!output/dna_condensation_analysis_results/*.md
+# Ignore all subfolders (timestamped runs, bbbc022, nd2) and their contents
+output/dna_condensation_analysis_results/*/
+output/dna_condensation_analysis_results/*/**
 
 # Development and debug scripts
 dev_scripts/
