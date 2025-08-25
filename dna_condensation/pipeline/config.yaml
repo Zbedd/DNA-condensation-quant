@@ -6,7 +6,7 @@ dev_mode: false                 # If true, settings from dev_config.yaml will ov
 
 # ==== FILE PATHS ====
 # ==== INPUT SOURCE CONFIGURATION ====
-input_source: "bbbc022"        # Options: "nd2" or "bbbc022"
+input_source: "nd2"        # Options: "nd2" or "bbbc022"
 
 # ND2 file processing paths
 raw_nd2_path: "G:/My Drive/KatzLab/DNA-condensation-quantification/raw_nd2"  # Path to folder containing ND2 files

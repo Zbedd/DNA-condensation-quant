@@ -11,5 +11,6 @@ Improve filtering. I had to set min_size relative to medium to >100, indicating 
 Add CCP {cm:2025-08-24}
 Add CI {cm:2025-08-24}
 Add a summary plot (minimum CCP, CV, CI) {cm:2025-08-24}
-Get CI calculated correctly
-Fix key_metrics
+Get CI calculated correctly {cm:2025-08-24}
+Fix key_metrics {cm:2025-08-24}
+Create a table of the images used in bbbc. Modify the print statement to also include the image count for control filtering. {cm:2025-08-24}

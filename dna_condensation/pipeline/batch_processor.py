@@ -12,13 +12,136 @@ import numpy as np
 import warnings
 from datetime import datetime
 from dna_condensation.pipeline.config import config
-from dna_condensation.core.image_loader import get_nd2_objects
+from dna_condensation.core.image_loader import get_nd2_objects, BBBC022_CACHE_DIR
 from dna_condensation.core.config_validator import ND2SelectionValidator
 from dna_condensation.core.z_stack_handling import batch_collapse_z_axis
 from dna_condensation.core.preprocessor import bulk_preprocess_images, per_nucleus_intensity_normalization
 from dna_condensation.core.segmentation import bulk_segment_images
 from dna_condensation.core.plotting import plot_image, plot_multiple, plot_image_mask, plot_preprocessing_comparison
 from dna_condensation.analysis.analysis_pipeline import run_analysis_from_batch_processor
+
+# --- Helpers ---
+def _write_bbbc022_image_summary(run_output: Path, image_names, masks) -> None:
+  """Write one-row-per-image summary for BBBC022 with metadata and nuclei count.
+
+  Columns mimic validate_bbbc_groupings: [image_name, plate, well, compound, condition]
+  and additionally include: n_nuclei.
+  Output: run_output / 'bbbc022_image_summary.csv'
+  """
+  import pandas as pd
+  import numpy as np
+
+  # Locate cached metadata CSV (loader ensures availability)
+  csv_path = Path(BBBC022_CACHE_DIR) / "BBBC022_v1_image.csv"
+  if not csv_path.exists():
+    raise FileNotFoundError(
+      f"BBBC022 metadata CSV not found at {csv_path}. Run the loader once to cache it."
+    )
+
+  # Read with robust options (mirrors validator)
+  df = pd.read_csv(
+    csv_path,
+    engine="python",
+    encoding="utf-8",
+    sep=",",
+    quotechar='"',
+    quoting=3,
+    on_bad_lines='skip',
+  )
+  df.columns = df.columns.str.strip().str.strip('"')
+
+  # Column selection (same candidates as validator)
+  name_col_candidates = [
+    'Image_FileName_Hoechst',
+    'Image_FileName_DNA',
+    'Image_FileName_OrigHoechst',
+  ]
+  well_col = 'Image_Metadata_CPD_WELL_POSITION'
+  compound_col = 'Image_Metadata_SOURCE_COMPOUND_NAME'
+  plate_col = 'Image_Metadata_PlateID'
+
+  for required in (well_col, compound_col, plate_col):
+    if required not in df.columns:
+      raise RuntimeError(
+        f"Required column '{required}' not found in BBBC022 metadata CSV"
+      )
+
+  name_col = None
+  for c in name_col_candidates:
+    if c in df.columns:
+      name_col = c
+      break
+  if not name_col:
+    raise RuntimeError(
+      f"Could not locate an image filename column in CSV; tried {name_col_candidates}"
+    )
+
+  def _clean_name(s: str) -> str:
+    s = str(s).strip()
+    if s.startswith('"') and s.endswith('"'):
+      s = s[1:-1]
+    return s
+
+  def _is_blank(val) -> bool:
+    if val is None:
+      return True
+    try:
+      if isinstance(val, float) and np.isnan(val):
+        return True
+    except Exception:
+      pass
+    if isinstance(val, str):
+      t = val.strip()
+      if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
+        t = t[1:-1].strip()
+      return t == ""
+    return False
+
+  df = df.copy()
+  df["__clean_name"] = df[name_col].map(_clean_name)
+  meta_by_name = {row["__clean_name"]: row for _, row in df.iterrows()}
+
+  # Treatment terms from config
+  bcfg = config.get("bbbc022_settings", {}) or {}
+  treatment_terms = [t for t in (bcfg.get("treatment_compounds", []) or []) if isinstance(t, str) and t.strip()]
+
+  def _is_treatment(compound: str) -> bool:
+    if compound is None:
+      return False
+    s = str(compound)
+    return any(term.lower() in s.lower() for term in treatment_terms)
+
+  # Count nuclei per image from label masks
+  def _n_nuclei(mask) -> int:
+    if mask is None:
+      return 0
+    try:
+      m = int(np.max(mask))
+      return int(m) if m > 0 else 0
+    except Exception:
+      return 0
+
+  rows = []
+  for nm, m in zip(image_names, masks):
+    meta = meta_by_name.get(_clean_name(nm))
+    if meta is None:
+      raise RuntimeError(f"Selected image name not present in metadata CSV: {nm}")
+
+    compound_val = None if _is_blank(meta.get(compound_col)) else str(meta.get(compound_col))
+    condition = 'control' if compound_val is None else ('treatment' if _is_treatment(compound_val) else 'other')
+    rows.append({
+      'image_name': _clean_name(nm),
+      'plate': str(meta.get(plate_col)),
+      'well': str(meta.get(well_col)).strip('"').upper(),
+      'compound': compound_val,
+      'condition': condition,
+      'n_nuclei': _n_nuclei(m),
+    })
+
+  out_df = pd.DataFrame(rows, columns=['image_name', 'plate', 'well', 'compound', 'condition', 'n_nuclei'])
+  out_path = run_output / 'bbbc022_image_summary.csv'
+  out_df.to_csv(out_path, index=False)
+  print(f"Saved BBBC022 image summary: {out_path}")
 
 # Use shared config from pipeline.config (single source of truth)
 
@@ -392,6 +515,13 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
   
   # Execute comprehensive feature extraction and statistical analysis
   try:
+    # For BBBC022 runs, emit a minimal image-level summary (metadata + nuclei count)
+    if str(input_source).lower() == 'bbbc022':
+      try:
+        _write_bbbc022_image_summary(run_output=run_output, image_names=image_names, masks=masks)
+      except Exception as e:
+        print(f"ERR_BBBC022_METADATA_SUMMARY_FAILED: {e}")
+
     # Get image aggregation setting from config
     statistical_config = config.get("statistical_analysis", {})
     use_image_aggregation = statistical_config.get("use_image_aggregation", True)
@@ -677,10 +807,17 @@ def _compute_ci_reference_and_apply(run_output: Path, source: str, timestamp: st
   df_ctrl = df[df[group_col].isin(control_conditions)].copy()
   n_ctrl = len(df_ctrl)
 
-  # Report control subset reduction for CI reference size
-  print(
-    f"CI control reference selection: {n_ctrl} of {n_total} nuclei matched {group_col} in {list(control_conditions)}"
-  )
+  # Report control subset reduction for CI reference size (nuclei and images)
+  if 'image_name' in df.columns:
+    n_img_total = int(df['image_name'].nunique())
+    n_img_ctrl = int(df[df[group_col].isin(control_conditions)]['image_name'].nunique())
+    print(
+      f"CI control reference selection: {n_ctrl} of {n_total} nuclei and {n_img_ctrl} of {n_img_total} images matched {group_col} in {list(control_conditions)}"
+    )
+  else:
+    print(
+      f"CI control reference selection: {n_ctrl} of {n_total} nuclei matched {group_col} in {list(control_conditions)}"
+    )
 
   if n_ctrl == 0 or n_ctrl >= n_total:
     raise SystemExit(
