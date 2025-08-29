@@ -61,13 +61,16 @@ class ImageVisualizer:
         self.colormap = viz_config.get("colormap", "gray")
         # Colormap used for labeled-object overlays (distinct colors per object)
         self.label_colormap = viz_config.get("label_colormap", "tab20")
-        
+        # If true and ND2 with transfection_channel_index set, show protein channel beneath overlays in segmentation panel
+        self.show_protein_as_base = viz_config.get("show_protein_as_base", False)
+
         # Handle ND2 selection configuration
         self.selection_config = selection_override if selection_override is not None else self.config.get("nd2_selection_settings")
         self._validate_and_adjust_selection_config()
-        
+
         # Get input source for timestamping
         self.input_source = self.config.get("input_source", "unknown")
+        self.nd2_cfg = self.config.get("nd2_selection_settings", {}) or {}
         
         # Set up output directory
         self.output_dir = Path(__file__).parent / "output"
@@ -297,6 +300,9 @@ class ImageVisualizer:
         # Store overlay artists for toggling
         overlay_artists = []
         contour_artists = []
+        # For interactive protein-base toggle on the segmentation (rightmost) panel
+        seg_base_artists = [None] * n_display  # AxesImage per row
+        seg_base_images = [None] * n_display   # dict per row: {'nuc': np.ndarray, 'prot': np.ndarray or None}
         
         # Plot images
         for row in range(n_display):
@@ -317,10 +323,31 @@ class ImageVisualizer:
                 
                 # Get and normalize image
                 if base_images and row < len(base_images):
-                    img = self._normalize_image_for_display(base_images[row], channel_index)
+                    # Compute nuclear-base image (from analysis images)
+                    nuc_img = self._normalize_image_for_display(base_images[row], channel_index)
+                    # Compute optional protein-base image from RAW images (ND2 only)
+                    prot_img = None
+                    if (
+                        stage == 'segmentation'
+                        and str(self.input_source).lower() == 'nd2'
+                        and self.nd2_cfg.get('transfection_channel_index') is not None
+                        and raw_images and row < len(raw_images)
+                        and raw_images[row] is not None
+                        and raw_images[row].ndim == 3
+                    ):
+                        prot_idx = int(self.nd2_cfg.get('transfection_channel_index'))
+                        if 0 <= prot_idx < raw_images[row].shape[2]:
+                            prot_img = self._normalize_image_for_display(raw_images[row], prot_idx)
+
+                    # Decide which base to show initially
+                    img = prot_img if (stage == 'segmentation' and self.show_protein_as_base and prot_img is not None) else nuc_img
                     
                     if img is not None:
-                        ax.imshow(img, cmap=self.colormap)
+                        im_artist = ax.imshow(img, cmap=self.colormap)
+                        # Save base artist and both options for segmentation panel only
+                        if stage == 'segmentation':
+                            seg_base_artists[row] = im_artist
+                            seg_base_images[row] = {'nuc': nuc_img, 'prot': prot_img}
                         
                         # Add segmentation overlay if this is the segmentation stage
                         if enable_overlay_controls and masks and row < len(masks):
@@ -362,7 +389,9 @@ class ImageVisualizer:
             contour_artists.append(row_contours)
         
         # Add interactive controls
-        self._add_interactive_controls(fig, overlay_artists, contour_artists)
+        self._add_interactive_controls(fig, overlay_artists, contour_artists, seg_base_artists, seg_base_images)
+        # Track protein-base state on the figure for toggling
+        fig._protein_base_on = bool(self.show_protein_as_base)
         
         plt.tight_layout()
         
@@ -379,19 +408,19 @@ class ImageVisualizer:
         plt.show()
         return fig
     
-    def _add_interactive_controls(self, fig, overlay_artists, contour_artists):
+    def _add_interactive_controls(self, fig, overlay_artists, contour_artists, seg_base_artists=None, seg_base_images=None):
         """Add interactive toggle buttons for overlays and contours."""
         # Create axes for the checkboxes
-        checkbox_ax = plt.axes([0.01, 0.7, 0.12, 0.15])
+        checkbox_ax = plt.axes([0.01, 0.65, 0.14, 0.22])
         
         # Create checkboxes
-        labels = ['Fill Overlay', 'Contours']
-        visibility = [self.show_overlay, True]  # Start with overlays as configured, contours enabled
+        labels = ['Fill Overlay', 'Contours', 'Protein Base']
+        visibility = [self.show_overlay, True, bool(self.show_protein_as_base)]  # Start with overlays as configured
         checkbox = CheckButtons(checkbox_ax, labels, visibility)
         
         # Customize checkbox appearance
-        checkbox.labels[0].set_fontsize(10)
-        checkbox.labels[1].set_fontsize(10)
+        for lbl in checkbox.labels:
+            lbl.set_fontsize(10)
         
         def toggle_overlay(label):
             """Toggle overlay visibility."""
@@ -419,6 +448,20 @@ class ImageVisualizer:
                             else:
                                 # Single artist
                                 contour.set_visible(not contour.get_visible())
+            elif label == 'Protein Base':
+                # Toggle base image between nuclear and protein in segmentation column
+                fig._protein_base_on = not getattr(fig, '_protein_base_on', False)
+                if seg_base_artists is not None and seg_base_images is not None:
+                    for i, artist in enumerate(seg_base_artists):
+                        if artist is None:
+                            continue
+                        img_pair = seg_base_images[i] if i < len(seg_base_images) else None
+                        if not isinstance(img_pair, dict):
+                            continue
+                        target = 'prot' if fig._protein_base_on else 'nuc'
+                        new_img = img_pair.get(target)
+                        if new_img is not None:
+                            artist.set_data(new_img)
             
             plt.draw()
         

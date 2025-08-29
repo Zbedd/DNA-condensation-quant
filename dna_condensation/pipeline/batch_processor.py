@@ -17,6 +17,7 @@ from dna_condensation.core.config_validator import ND2SelectionValidator
 from dna_condensation.core.z_stack_handling import batch_collapse_z_axis
 from dna_condensation.core.preprocessor import bulk_preprocess_images, per_nucleus_intensity_normalization
 from dna_condensation.core.segmentation import bulk_segment_images
+from dna_condensation.core.transfection_filter import filter_labels_by_transfection_batch
 from dna_condensation.core.plotting import plot_image, plot_multiple, plot_image_mask, plot_preprocessing_comparison
 from dna_condensation.analysis.analysis_pipeline import run_analysis_from_batch_processor
 
@@ -391,6 +392,25 @@ def run_unified_pipeline(raw_images, image_names, metadata, output_dir, input_so
   # CRITICAL: return_labels=True ensures each nucleus gets unique ID for per-nucleus feature extraction
   masks = bulk_segment_images(global_preprocessed, channel_index=channel_index, method=segmentation_method, 
                              size_filter_config=size_filter_config, return_labels=True)
+
+  # === OPTIONAL TRANSFECTION-ONLY FILTER (ND2 only) ===
+  # If nd2 source and transfection channel is defined, keep only transfected nuclei based on protein channel.
+  if str(input_source).lower() == 'nd2':
+    nd2_cfg = config.get('nd2_selection_settings', {}) or {}
+    protein_idx = nd2_cfg.get('transfection_channel_index', None)
+    if protein_idx is not None:
+      tf_cfg = (config.get('transfection_filter', {}) or {})
+      filtered_masks, stats = filter_labels_by_transfection_batch(
+        images=global_preprocessed,
+        labels_list=masks,
+        protein_channel_index=int(protein_idx),
+        settings=tf_cfg,
+      )
+      # Replace masks and report concise summary
+      kept = sum(s.get('kept', 0) for s in stats if isinstance(s, dict))
+      total = sum(s.get('total', 0) for s in stats if isinstance(s, dict))
+      print(f"Transfection filter applied (protein channel {protein_idx}): kept {kept}/{total} nuclei across {len(filtered_masks)} images")
+      masks = filtered_masks
 
   # === PER-NUCLEUS PREPROCESSING ===
   # Apply per-nucleus intensity normalization if enabled (alternative to global normalization)

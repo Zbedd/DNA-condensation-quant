@@ -30,6 +30,7 @@ nd2_selection_settings:
     exclude_patterns: null       # List of patterns to exclude (if ANY present, file excluded)
   seed: 42                       # Seed for reproducible balanced random sampling
   nuclear_channel_index: 1       # Expected 1 where channel 0 = GFP, channel 1 = DNA
+  transfection_channel_index: 0  # Expected 0 where channel 0 = Transfection marker
   # Note: Always uses balanced random sampling - equal representation across ID+name groups
   # Controls definition for CI reference calculations
   control_group_column: condition  # Column in all_features.csv with group labels
@@ -69,7 +70,7 @@ segmentation_settings:
 # Size-based filtering (removes small objects relative to median size)
 size_filtering:
   enabled: true                 # Enable/disable size-based filtering
-  min_size_percentage: 30       # Minimum size as percentage of median (e.g., 20 = 20% of median)
+  min_size_percentage: 60       # Minimum size as percentage of median (e.g., 20 = 20% of median)
 
 #=== SIZE FILTERING SUMMARY EXAMPLE ===
 # Original objects: 66
@@ -123,7 +124,7 @@ preprocessing:
   deconvolution: false         # Apply Richardson-Lucy deconvolution (optional, slower, disabled because it may interfere with analysis)
   deconv_iterations: 10        # Deconvolution iterations
 
-  intensity_normalization: true # Apply global intensity normalization (recommended for batch comparison)
+  intensity_normalization: false # Apply global intensity normalization (recommended for batch comparison)
   norm_method: "percentile"    # Normalization method: percentile, zscore, minmax, target_mean
 
   per_nucleus_normalization: true  # Apply per-nucleus normalization for homogeneity analysis
@@ -169,17 +170,28 @@ plot:
 # ==== IMAGE VISUALIZATION SETTINGS ====
 # Configuration for visualize_images.py script
 image_visualization:
-  n_images: 6                   # Number of images to display in grid
+  n_images: 2                   # Number of images to display in grid
   stages:                       # Processing stages to show (options: raw, preprocessed, final, segmentation)
     - raw
     - preprocessed 
     - segmentation
   show_segmentation_overlay: true  # Show faint segmentation overlay on segmentation stage (toggleable)
+  show_protein_as_base: false      # If true and ND2 with transfection_channel_index set, use protein channel as base image in rightmost (segmentation) panel
   overlay_alpha: 0.3            # Transparency of segmentation overlay (0.0=invisible, 1.0=opaque)
   contour_color: "red"          # Color for segmentation contours (red, blue, green, yellow)
   contour_width: 0.5            # Width of segmentation contour lines
   figure_size: [15, 10]         # Figure size in inches [width, height]
   colormap: "gray"              # Matplotlib colormap for image display
+
+# ==== OPTIONAL TRANSFECTION FILTER SETTINGS (ND2 only) ====
+transfection_filter:
+  background_radius: 50   # Rolling-ball radius for protein background removal (px)
+  r_in: 6                 # Inner ring dilation radius (px)
+  r_out: 10               # Outer ring dilation radius (px)
+  q_target: 0.05          # Benjamini–Hochberg FDR target
+  delta_min: 0.8          # Minimum log2 fold-change (≈ log2(1.5))
+  min_nucleus_pixels: 50  # Minimum pixels per nucleus
+  min_ring_pixels: 200    # Minimum pixels in annular background
 
 # Verbose output
 verbose: true                   # Print detailed progress information
