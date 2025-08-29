@@ -184,6 +184,47 @@ These metrics describe the size and shape of the nucleus. They are derived from 
 - Requires GPU for reasonable speed
 - Pre-trained on diverse microscopy data
 
+### Transfection-only nuclei filter (ND2 only)
+
+Optionally restricts analysis to nuclei with positive signal in a designated protein/transfection channel.
+
+- When it runs: only if `input_source: nd2` AND `nd2_selection_settings.transfection_channel_index` is set (not null).
+- Where it runs: post-segmentation, before feature extraction. Non-transfected nuclei are removed from the label mask and relabeled sequentially.
+- How it decides: compares per-nucleus signal against a background model using robust statistics (median/MAD), controls FDR, and enforces a minimum log2 fold-change.
+
+Method options (config key: `transfection_filter.method`)
+- annulus (default):
+    - Local background from an annular ring around each nucleus (excluding all nuclei).
+    - Key params: `r_in`, `r_out`, `min_ring_pixels`, optional `ring_high_clip_percentile` to clip bright outliers in the ring, and `background_radius` for rolling-ball correction on the protein channel.
+- global:
+    - Background from non-nuclear pixels, excluding a global margin around all nuclei.
+    - Key params: `global_exclusion_radius` (margin) and `global_background_percentile` (low-tail trimming for robustness).
+
+Significance and effect-size gates
+- `q_target`: Benjamini–Hochberg FDR threshold (lower → more selective).
+- `delta_min`: Minimum log2 fold-change nucleus vs background (higher → more selective).
+
+Tuning tips (to be more selective)
+- Increase `delta_min` (e.g., 0.8–1.0), decrease `q_target` (e.g., 0.01–0.02).
+- For annulus: increase `r_in`, `r_out`, and `min_ring_pixels`; consider `ring_high_clip_percentile: 90`–`95` to suppress ring outliers.
+- If local spillover contaminates the ring, try `method: global` and adjust global params.
+
+Minimal YAML example
+```yaml
+transfection_filter:
+    method: annulus         # or global
+    background_radius: 75   # rolling-ball radius on protein channel
+    r_in: 6                 # annulus inner dilation (px)
+    r_out: 18               # annulus outer dilation (px)
+    min_ring_pixels: 800    # ensure a stable ring estimate
+    ring_high_clip_percentile: 90   # optional ring outlier clipping
+    global_exclusion_radius: 10     # used when method: global
+    global_background_percentile: 20
+    q_target: 0.02          # FDR target
+    delta_min: 1.0          # log2 fold-change threshold
+    min_nucleus_pixels: 50
+```
+
 ### Preprocessing Strategies
 
 **Standard Workflow** (cross-sample comparison):

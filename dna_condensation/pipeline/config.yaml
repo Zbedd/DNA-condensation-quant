@@ -185,9 +185,14 @@ image_visualization:
 
 # ==== OPTIONAL TRANSFECTION FILTER SETTINGS (ND2 only) ====
 transfection_filter:
+  method: global        # Background model for transfection calling: annulus | global
   background_radius: 50   # Rolling-ball radius for protein background removal (px)
+  
+  # Annulus-specific configs
   r_in: 6                 # Inner ring dilation radius (px)
   r_out: 10               # Outer ring dilation radius (px)
+
+  # Applied in both global and annulus 
   q_target: 0.05          # Benjamini–Hochberg FDR target
   delta_min: 0.8          # Minimum log2 fold-change (≈ log2(1.5))
   min_nucleus_pixels: 50  # Minimum pixels per nucleus

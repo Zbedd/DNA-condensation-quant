@@ -23,6 +23,10 @@ from skimage.morphology import binary_dilation, disk
 from skimage.restoration import rolling_ball
 
 
+# Print the selected filtering method only once per process
+_PRINTED_METHOD: bool = False
+
+
 def _mad(x: np.ndarray) -> float:
     if x.size == 0:
         return 0.0
@@ -58,9 +62,17 @@ def _prep_protein_channel(image: np.ndarray, protein_channel_index: int, bg_radi
     if image is None:
         return None  # type: ignore
     if image.ndim == 3:
-        if protein_channel_index < 0 or protein_channel_index >= image.shape[2]:
-            raise ValueError(f"Protein channel index {protein_channel_index} out of range for image with {image.shape[2]} channels")
-        chan = image[:, :, int(protein_channel_index)]
+        # Support both HWC and CHW
+        c = int(protein_channel_index)
+        if 0 <= c < image.shape[0] and image.shape[0] <= 16:
+            chan = image[c, ...]
+        elif 0 <= c < image.shape[2]:
+            chan = image[:, :, c]
+        else:
+            raise ValueError(
+                f"Protein channel index {c} out of range for image with shape {image.shape} "
+                "(supported layouts: CHW, HWC)"
+            )
     elif image.ndim == 2:
         chan = image
     else:
@@ -78,36 +90,127 @@ def _prep_protein_channel(image: np.ndarray, protein_channel_index: int, bg_radi
     return corr
 
 
-def _compute_per_nucleus_stats(I: np.ndarray, labels: np.ndarray, nucleus_id: int,
-                               r_in: int, r_out: int,
-                               all_nuclei: Optional[np.ndarray] = None) -> Optional[Tuple[float, float, float, int, int]]:
-    """Compute robust nucleus vs local annulus statistics.
+def _compute_global_background(
+    I: np.ndarray,
+    labels: np.ndarray,
+    *,
+    exclusion_radius: int = 8,
+    percentile: int = 20,
+) -> Tuple[float, float, int]:
+    """Global background from non-nuclear pixels excluding a margin around ALL nuclei.
+    Returns (bg_median, bg_sigma_robust, n_bg_pixels). Fails fast if no pixels available.
+    """
+    all_nuc = labels > 0
+    if exclusion_radius > 0:
+        margin = binary_dilation(all_nuc, footprint=disk(int(exclusion_radius)))
+        bg_mask = ~margin
+    else:
+        bg_mask = ~all_nuc
+    vals = I[bg_mask]
+    if vals.size == 0:
+        raise RuntimeError("ERR_GLOBAL_BG_EMPTY: no pixels available for global background")
+    # Robust low-tail trimming to avoid bright structures in 'background'
+    thr = np.percentile(vals, int(percentile))
+    vals = vals[vals <= thr]
+    if vals.size == 0:
+        raise RuntimeError("ERR_GLOBAL_BG_TRIM_EMPTY: percentile trimming removed all background pixels")
+    bg_med = float(np.median(vals))
+    bg_sig = float(1.4826 * _mad(vals))
+    return bg_med, max(bg_sig, 1e-6), int(vals.size)
+
+
+def _background_stats_global(
+    I: np.ndarray,
+    labels: np.ndarray,
+    nucleus_id: int,
+    *,
+    global_bg: Optional[Tuple[float, float, int]] = None,
+) -> Optional[Tuple[float, float, float, int, int]]:
+    """Global background stats for a single nucleus.
+
+    Returns (mu_in, mu_bg, sigma_bg, bg_px, nuc_px) or None if invalid nucleus.
+    """
+    if global_bg is None:
+        raise RuntimeError("ERR_GLOBAL_BG_NOT_PROVIDED: global background must be computed once per image")
+    nuc = (labels == nucleus_id)
+    nuc_px = int(nuc.sum())
+    if nuc_px <= 0:
+        return None
+    mu_in = float(np.median(I[nuc]))
+    mu_bg, sigma_bg, bg_px = global_bg
+    return mu_in, float(mu_bg), float(sigma_bg), int(bg_px), nuc_px
+
+
+def _background_stats_annulus(
+    I: np.ndarray,
+    labels: np.ndarray,
+    nucleus_id: int,
+    *,
+    r_in: int = 3,
+    r_out: int = 10,
+    min_ring_pixels: int = 200,
+    ring_high_clip_percentile: Optional[float] = None,
+) -> Optional[Tuple[float, float, float, int, int]]:
+    """Local annulus background stats for a single nucleus.
 
     Returns (mu_in, mu_bg, sigma_bg, ring_px, nuc_px) or None if insufficient pixels.
     """
     nuc = (labels == nucleus_id)
-    if all_nuclei is None:
-        all_nuclei = labels > 0
+    nuc_px = int(nuc.sum())
+    if nuc_px <= 0:
+        return None
+    mu_in = float(np.median(I[nuc]))
 
-    # Construct ring R = (dilate_out & ~dilate_in) & ~all_nuclei
+    all_nuclei = labels > 0
     se_in = disk(int(max(1, r_in)))
     se_out = disk(int(max(1, r_out)))
     A_in = binary_dilation(nuc, footprint=se_in)
     A_out = binary_dilation(nuc, footprint=se_out)
     ring = A_out & (~A_in) & (~all_nuclei)
-
-    nuc_px = int(nuc.sum())
     ring_px = int(ring.sum())
-    if nuc_px <= 0 or ring_px <= 0:
+    if ring_px < max(1, int(min_ring_pixels)):
         return None
-
-    nuc_vals = I[nuc]
     ring_vals = I[ring]
-
-    mu_in = float(np.median(nuc_vals))
+    if ring_high_clip_percentile is not None:
+        hi = np.percentile(ring_vals, float(ring_high_clip_percentile))
+        ring_vals = ring_vals[ring_vals <= hi]
+        if ring_vals.size == 0:
+            return None
     mu_bg = float(np.median(ring_vals))
-    sigma_bg = 1.4826 * _mad(ring_vals)
-    return mu_in, mu_bg, float(sigma_bg), ring_px, nuc_px
+    sigma_bg = float(1.4826 * _mad(ring_vals))
+    return mu_in, mu_bg, max(sigma_bg, 1e-6), ring_px, nuc_px
+
+
+def _compute_background_stats(
+    I: np.ndarray,
+    labels: np.ndarray,
+    nucleus_id: int,
+    *,
+    model: str = "annulus",
+    r_in: int = 3,
+    r_out: int = 10,
+    min_ring_pixels: int = 200,
+    ring_high_clip_percentile: Optional[float] = None,
+    global_bg: Optional[Tuple[float, float, int]] = None,
+) -> Optional[Tuple[float, float, float, int, int]]:
+    """Return (mu_in, mu_bg, sigma_bg, bg_px, nuc_px) per nucleus, or None if insufficient pixels.
+    Delegates to specialized helpers based on model.
+    - model='annulus': uses local annular background
+    - model='global': uses precomputed global background
+    """
+    model = str(model).lower()
+    if model == "global":
+        return _background_stats_global(I, labels, nucleus_id, global_bg=global_bg)
+    # Default: annulus
+    return _background_stats_annulus(
+        I,
+        labels,
+        nucleus_id,
+        r_in=r_in,
+        r_out=r_out,
+        min_ring_pixels=min_ring_pixels,
+        ring_high_clip_percentile=ring_high_clip_percentile,
+    )
 
 
 def filter_labels_by_transfection(
@@ -116,6 +219,10 @@ def filter_labels_by_transfection(
     protein_channel_index: int,
     *,
     background_radius: int = 50,
+    method: str = "annulus",
+    global_exclusion_radius: int = 8,
+    global_background_percentile: int = 20,
+    ring_high_clip_percentile: Optional[float] = None,
     r_in: int = 3,
     r_out: int = 10,
     q_target: float = 0.05,
@@ -140,12 +247,35 @@ def filter_labels_by_transfection(
     if total == 0:
         return labels.copy(), {"kept": 0, "total": 0}
 
-    all_nuclei_mask = labels > 0
+    # Precompute global background once if needed (method controls background model)
+    bg_model = str(method or "annulus").lower()
+    global _PRINTED_METHOD
+    if not _PRINTED_METHOD:
+        try:
+            print(f"[transfection_filter] method={bg_model}")
+        finally:
+            _PRINTED_METHOD = True
+    precomputed_global: Optional[Tuple[float, float, int]] = None
+    if bg_model == "global":
+        precomputed_global = _compute_global_background(
+            I, labels, exclusion_radius=int(global_exclusion_radius), percentile=int(global_background_percentile)
+        )
+
     eps = 1e-6 * float(I.max() - I.min() if np.isfinite(I).all() else 1.0)
     Z, dlog2, keep_ids, sizes_ok = [], [], [], []
 
     for k in all_ids:
-        stats = _compute_per_nucleus_stats(I, labels, int(k), r_in, r_out, all_nuclei_mask)
+        stats = _compute_background_stats(
+            I,
+            labels,
+            int(k),
+            model=bg_model,
+            r_in=int(r_in),
+            r_out=int(r_out),
+            min_ring_pixels=int(min_ring_pixels),
+            ring_high_clip_percentile=ring_high_clip_percentile,
+            global_bg=precomputed_global,
+        )
         if stats is None:
             continue
         mu_in, mu_bg, sd_bg, ring_px, nuc_px = stats
@@ -194,6 +324,10 @@ def filter_labels_by_transfection(
         "tested": int(len(keep_ids)),
         "params": {
             "background_radius": int(background_radius),
+            "method": str(bg_model),
+            "global_exclusion_radius": int(global_exclusion_radius),
+            "global_background_percentile": int(global_background_percentile),
+            "ring_high_clip_percentile": (None if ring_high_clip_percentile is None else float(ring_high_clip_percentile)),
             "r_in": int(r_in),
             "r_out": int(r_out),
             "q_target": float(q_target),
@@ -223,11 +357,17 @@ def filter_labels_by_transfection_batch(
             filtered_list.append(lab)
             stats_list.append({"kept": 0, "total": 0})
             continue
+        # Select background model only from 'method' with default to 'annulus' if unspecified
+        _model = str(settings.get("method", "annulus"))
         flt, st = filter_labels_by_transfection(
             img,
             lab,
             protein_channel_index,
             background_radius=int(settings.get("background_radius", 50)),
+            method=_model,
+            global_exclusion_radius=int(settings.get("global_exclusion_radius", 8)),
+            global_background_percentile=int(settings.get("global_background_percentile", 20)),
+            ring_high_clip_percentile=settings.get("ring_high_clip_percentile", None),
             r_in=int(settings.get("r_in", 3)),
             r_out=int(settings.get("r_out", 10)),
             q_target=float(settings.get("q_target", 0.05)),
