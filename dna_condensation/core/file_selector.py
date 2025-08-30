@@ -9,6 +9,7 @@ import re
 import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+from dna_condensation.pipeline.config import config
 from collections import defaultdict
 
 
@@ -36,7 +37,8 @@ class ND2FileSelector:
                             If None, no filtering is applied (select all files).
         """
         self.config = selection_config or {}
-        self.seed = self.config.get('seed', 42)
+        # Use global seed from central config
+        self.seed = config.get_seed(42)
         
     def select_files(self, nd2_file_paths: List[Path]) -> List[Path]:
         """

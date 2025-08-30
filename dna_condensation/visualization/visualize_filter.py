@@ -5,10 +5,11 @@ Filter Visualization Script
 Compares segmentation results with transfection filter OFF vs ON, side-by-side,
 and shows a composite of Nuclear (Red) and LSD1/Protein (Green) channels.
 
-Layout per image (3 columns):
-- Left:  Composite RGB (Nuclear→Red, LSD1→Green)
-- Middle: Segmentation (filter = False)
-- Right:  Segmentation (filter = True)
+Layout per image (4 columns):
+- Col 0: Composite RGB (Nuclear→Red, LSD1→Green)
+- Col 1: LSD1 channel only (Green)
+- Col 2: Segmentation (filter = False)
+- Col 3: Segmentation (filter = True)
 
 Fail-fast checks:
 - input_source must be 'nd2'
@@ -85,7 +86,6 @@ class FilterVisualizer:
         if self.selection_config is None:
             self.selection_config = {
                 "count": self.n_images,
-                "seed": 42,
             }
             print(f"No ND2 selection config found. Using visualization default: {self.n_images} images")
             return
@@ -99,7 +99,6 @@ class FilterVisualizer:
             print("Using default visualization settings instead.")
             self.selection_config = {
                 "count": self.n_images,
-                "seed": 42,
             }
             return
 
@@ -252,9 +251,9 @@ class FilterVisualizer:
         if n_display == 0:
             raise RuntimeError("ERR_VIS_FILTER_NO_IMAGES: zero images available for visualization")
 
-        # 3 columns: Composite | Seg(F) | Seg(T)
+        # 4 columns: Composite | LSD1-only | Seg(F) | Seg(T)
         n_rows = n_display
-        n_cols = 3
+        n_cols = 4
         fig, axes = plt.subplots(n_rows, n_cols, figsize=self.figure_size)
         if n_rows == 1:
             axes = axes.reshape(1, -1)
@@ -293,15 +292,29 @@ class FilterVisualizer:
             row_overlays.append(None)
             row_contours.append(None)
 
-            # Column 1: Segmentation (filter=False)
+            # Column 1: LSD1 channel only (Green)
             ax1 = axes[row, 1]
             ax1.set_xticks([])
             ax1.set_yticks([])
+            base_ch = raw_images[row]
+            prot_img = self._normalize_image_for_display(base_ch, prot_channel)
+            rgb_g = np.zeros((prot_img.shape[0], prot_img.shape[1], 3), dtype=np.float32)
+            rgb_g[..., 1] = prot_img  # Green only
+            ax1.imshow(rgb_g)
+            if row == 0:
+                ax1.set_title("LSD1 channel (G)", fontsize=12, fontweight="bold")
+            row_overlays.append(None)
+            row_contours.append(None)
+
+            # Column 2: Segmentation (filter=False)
+            ax2 = axes[row, 2]
+            ax2.set_xticks([])
+            ax2.set_yticks([])
             base1 = final_images[row]
             img1 = self._normalize_image_for_display(base1, nuc_channel)
-            ax1.imshow(img1, cmap=self.colormap)
+            ax2.imshow(img1, cmap=self.colormap)
             o1, c1 = self._add_segmentation_overlay(
-                ax1,
+                ax2,
                 masks_off[row] if row < len(masks_off) else None,
                 color=self.contour_color,
                 alpha=self.overlay_alpha,
@@ -310,19 +323,19 @@ class FilterVisualizer:
                 show_contours=True,
             )
             if row == 0:
-                ax1.set_title("Segmentation (filter=False)", fontsize=12, fontweight="bold")
+                ax2.set_title("Segmentation (filter=False)", fontsize=12, fontweight="bold")
             row_overlays.append(o1)
             row_contours.append(c1)
 
-            # Column 2: Segmentation (filter=True)
-            ax2 = axes[row, 2]
-            ax2.set_xticks([])
-            ax2.set_yticks([])
+            # Column 3: Segmentation (filter=True)
+            ax3 = axes[row, 3]
+            ax3.set_xticks([])
+            ax3.set_yticks([])
             base2 = final_images[row]  # same base
             img2 = self._normalize_image_for_display(base2, nuc_channel)
-            ax2.imshow(img2, cmap=self.colormap)
+            ax3.imshow(img2, cmap=self.colormap)
             o2, c2 = self._add_segmentation_overlay(
-                ax2,
+                ax3,
                 masks_on[row] if row < len(masks_on) else None,
                 color=self.contour_color,
                 alpha=self.overlay_alpha,
@@ -331,7 +344,7 @@ class FilterVisualizer:
                 show_contours=True,
             )
             if row == 0:
-                ax2.set_title("Segmentation (filter=True)", fontsize=12, fontweight="bold")
+                ax3.set_title("Segmentation (filter=True)", fontsize=12, fontweight="bold")
             row_overlays.append(o2)
             row_contours.append(c2)
 

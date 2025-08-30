@@ -3,7 +3,8 @@
 
 ## DEVELOPMENT SETTINGS
 dev_mode: false                 # If true, settings from dev_config.yaml will override these settings
-
+seed: 42                        # Global RNG seed (single source of truth for all randomness)
+#43
 # ==== FILE PATHS ====
 # ==== INPUT SOURCE CONFIGURATION ====
 input_source: "nd2"        # Options: "nd2" or "bbbc022"
@@ -28,7 +29,6 @@ nd2_selection_settings:
   file_pattern_filters:          # Pattern-based filtering on full filename
     include_patterns: null       # List of patterns that must ALL be present (AND logic)
     exclude_patterns: null       # List of patterns to exclude (if ANY present, file excluded)
-  seed: 42                       # Seed for reproducible balanced random sampling
   nuclear_channel_index: 1       # Expected 1 where channel 0 = GFP, channel 1 = DNA
   transfection_channel_index: 0  # Expected 0 where channel 0 = Transfection marker
   # Note: Always uses balanced random sampling - equal representation across ID+name groups
@@ -40,7 +40,6 @@ nd2_selection_settings:
 bbbc022_settings:
   count: 40                     # Number of images to sample for validation
   channels: ['OrigHoechst']     # Channels to load (DNA staining)
-  seed: 42                      # Random seed for reproducible sampling
   auto_group_split: false       # Set to false to use manual group mapping (automatic not yet implemented)
   nuclear_channel_index: 0      # BBBC022 images are single-channel (use 0)
   # Compounds considered as DNA-condensation-inducing treatments for grouping (case-insensitive substring match)
@@ -62,7 +61,7 @@ segmentation_settings:
   stardist:
     nms_thresh: 0.2            # Non-maximum suppression IoU threshold. Lower merges overlapping fragments more aggressively.
                                # StarDist default is ~0.4; 0.30 is a good starting point to reduce over-splitting.
-    prob_thresh: 0.75          # Detection probability threshold (null = use StarDist default)
+    prob_thresh: 0.7          # Detection probability threshold (null = use StarDist default)
     min_size: null             # Minimum instance size in pixels (null = use StarDist default)
 
 
@@ -70,7 +69,8 @@ segmentation_settings:
 # Size-based filtering (removes small objects relative to median size)
 size_filtering:
   enabled: true                 # Enable/disable size-based filtering
-  min_size_percentage: 60       # Minimum size as percentage of median (e.g., 20 = 20% of median)
+  min_size_percentage: 60       # Minimum size as percentage of baseline below (e.g., 20 = 20% of baseline)
+  reference_percentile: 65      # Reference percentile for size baseline (50 = median). Example: set to 85 to use 85th percentile as the reference size.
 
 #=== SIZE FILTERING SUMMARY EXAMPLE ===
 # Original objects: 66

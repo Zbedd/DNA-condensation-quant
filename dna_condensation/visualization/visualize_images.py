@@ -87,7 +87,6 @@ class ImageVisualizer:
             # Create a visualization-specific config to limit to displayable images
             self.selection_config = {
                 'count': self.n_images,
-                'seed': 42
             }
             print(f"No ND2 selection config found. Using visualization default: {self.n_images} images")
             return
@@ -103,7 +102,6 @@ class ImageVisualizer:
             print("Using default visualization settings instead.")
             self.selection_config = {
                 'count': self.n_images,
-                'seed': 42
             }
             return
         

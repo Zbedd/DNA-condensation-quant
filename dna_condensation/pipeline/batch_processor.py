@@ -218,6 +218,12 @@ def _check_direct_execution_with_count_limit(input_source):
 
 
 def main(return_images=False, skip_validation=False):
+  # Seed RNGs centrally for reproducibility
+  try:
+    used_seed = config.seed_all()
+    print(f"Seeding RNGs with global seed: {used_seed}")
+  except Exception:
+    pass
   # Get input source configuration
   input_source = config.get("input_source")
   
@@ -758,7 +764,7 @@ def run_common_analysis_pipeline(global_preprocessed_images, per_nucleus_preproc
           colormap=nuclei_cfg.get("colormap", "magma"),
           channel_index=nuclei_cfg.get("channel_index"),
           save_path=out_path,
-          random_state=42,
+          random_state=config.get_seed(42),
         )
         print(f"✓ Nuclei panel saved to: {out_path}")
       except Exception as e:

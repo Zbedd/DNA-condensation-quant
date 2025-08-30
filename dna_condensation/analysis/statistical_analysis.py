@@ -378,14 +378,13 @@ class DNACondensationStatistics:
             })
         
         results_df = pd.DataFrame(comparison_results)
-        
-        # Multiple comparison correction
-        if len(results_df) > 1:
-            results_df = self._apply_multiple_comparison_correction(results_df)
-        
+
+        # Multiple comparison correction (robust even for 0/1 rows)
+        results_df = self._apply_multiple_comparison_correction(results_df)
+            
         # Store results
         self.results['group_comparisons'] = results_df
-        
+            
         return results_df
     
     def pairwise_comparisons(self, df: pd.DataFrame,
@@ -446,13 +445,12 @@ class DNACondensationStatistics:
                             'n1': len(data1),
                             'n2': len(data2)
                         })
-        
-        pairwise_df = pd.DataFrame(pairwise_results)
-        
-        # Multiple comparison correction
-        if len(pairwise_df) > 1:
-            pairwise_df = self._apply_multiple_comparison_correction(pairwise_df)
             
+        pairwise_df = pd.DataFrame(pairwise_results)
+            
+        # Multiple comparison correction (robust even for 0/1 rows)
+        pairwise_df = self._apply_multiple_comparison_correction(pairwise_df)
+                
         return pairwise_df
     
     def multivariate_analysis(self, df: pd.DataFrame,
@@ -499,10 +497,11 @@ class DNACondensationStatistics:
         pca_df[group_column] = analysis_df[group_column].values
         
         # K-means clustering
-        n_clusters = min(len(df[group_column].unique()), 4)  # Reasonable number
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        n_clusters = min(len(analysis_df[group_column].unique()), 4)  # Reasonable number
+        from dna_condensation.pipeline.config import config
+        kmeans = KMeans(n_clusters=n_clusters, random_state=config.get_seed(42))
         clusters = kmeans.fit_predict(scaled_data)
-        
+
         results = {
             'pca': {
                 'data': pca_df,
@@ -554,20 +553,64 @@ class DNACondensationStatistics:
                 return 0
     
     def _apply_multiple_comparison_correction(self, results_df: pd.DataFrame) -> pd.DataFrame:
-        """Apply Benjamini-Hochberg correction for multiple comparisons."""
+        """Apply Benjamini-Hochberg correction (FDR) with robust handling of NaNs and small N.
+
+        - Detect p-value column robustly (prefers 'p_value', falls back to common aliases)
+        - Coerces p-values to numeric
+        - If no finite p-values, returns DataFrame with p_corrected NaN and significant False
+        - If exactly one finite p-value, BH reduces to identity: p_corrected = p_value, significant = p < alpha
+        - Else, uses statsmodels.multipletests(method='fdr_bh') on finite subset and aligns results
+        """
+        import numpy as np
+        import pandas as pd
         from statsmodels.stats.multitest import multipletests
-        
-        # Apply correction
-        rejected, p_corrected, _, _ = multipletests(
-            results_df['p_value'], 
-            alpha=self.alpha, 
-            method='fdr_bh'
-        )
-        
-        results_df['p_corrected'] = p_corrected
-        results_df['significant'] = rejected
-        
-        return results_df
+
+        if results_df is None or len(results_df) == 0:
+            # Ensure columns exist for downstream consumers
+            results_df = results_df.copy()
+            results_df['p_corrected'] = np.nan
+            results_df['significant'] = False
+            return results_df
+
+        df = results_df.copy()
+
+        # Detect p-value column name
+        p_col_candidates = ['p_value', 'p', 'pval', 'pvalue']
+        p_col = None
+        for c in p_col_candidates:
+            if c in df.columns:
+                p_col = c
+                break
+        if p_col is None:
+            # Create empty column to keep downstream stable
+            df['p_value'] = np.nan
+            p_col = 'p_value'
+
+        # Coerce p-values to numeric and build finite mask
+        df[p_col] = pd.to_numeric(df[p_col], errors='coerce')
+        finite_mask = np.isfinite(df[p_col].to_numpy())
+
+        # Initialize outputs
+        df['p_corrected'] = np.nan
+        df['significant'] = False
+
+        n_finite = int(finite_mask.sum())
+        if n_finite == 0:
+            return df
+        elif n_finite == 1:
+            # Identity for a single test
+            idx = np.flatnonzero(finite_mask)[0]
+            p = float(df.iloc[idx][p_col])
+            df.at[df.index[idx], 'p_corrected'] = p
+            df.at[df.index[idx], 'significant'] = bool(p < self.alpha)
+            return df
+        else:
+            # Apply BH on finite subset and align
+            pvals = df.loc[finite_mask, p_col].to_numpy(dtype=float)
+            rejected, p_corrected, _, _ = multipletests(pvals, alpha=self.alpha, method='fdr_bh')
+            df.loc[finite_mask, 'p_corrected'] = p_corrected
+            df.loc[finite_mask, 'significant'] = rejected
+            return df
     
     def generate_summary_report(self, df: pd.DataFrame,
                                features: List[str],

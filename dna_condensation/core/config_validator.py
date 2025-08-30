@@ -54,10 +54,7 @@ class ND2SelectionValidator:
         if not is_valid:
             errors.extend(pattern_errors)
             
-        # Validate seed
-        is_valid, error_msg = self._validate_seed(config.get('seed'))
-        if not is_valid:
-            errors.append(error_msg)
+    # Seed is now global; no per-selection seed validation
             
         return len(errors) == 0, errors
     
@@ -184,23 +181,7 @@ class ND2SelectionValidator:
         
         return len(errors) == 0, errors
     
-    def _validate_seed(self, seed: Any) -> Tuple[bool, str]:
-        """
-        Validate seed parameter.
-        
-        Args:
-            seed: The seed value to validate
-            
-        Returns:
-            Tuple of (is_valid: bool, error_message: str)
-        """
-        if seed is None:
-            return False, "seed cannot be null - required for reproducible balanced random sampling"
-            
-        if not isinstance(seed, int):
-            return False, f"seed must be an integer, got {type(seed).__name__}: {seed}"
-            
-        return True, ""
+    # Removed per-selection seed validation; global seed lives at config.seed
     
     def get_validation_summary(self, config: Optional[Dict[str, Any]]) -> str:
         """
@@ -256,8 +237,6 @@ class ND2SelectionValidator:
             else:
                 summary += "  📝 Pattern filters: None\n"
                 
-            seed = config.get('seed', 42)
-            summary += f"  🎲 Random seed: {seed}\n"
             summary += "  ⚖️ Sampling: Balanced random across groups\n"
             
         else:

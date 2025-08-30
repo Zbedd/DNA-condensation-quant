@@ -4,6 +4,13 @@ Loads settings from config.yaml in the same directory.
 """
 from pathlib import Path
 from typing import Dict, Any, Optional
+import os
+import random
+
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 try:
     import yaml
@@ -105,6 +112,47 @@ class Config:
             return int(bcfg.get('nuclear_channel_index', 0))
         # Unknown source → conservative default
         return 0
+
+    # Global seeding utilities
+    def get_seed(self, default: int = 42) -> int:
+        """Return the global RNG seed from config (single source of truth)."""
+        try:
+            s = int(self.get('seed', default))
+        except Exception:
+            s = int(default)
+        return s
+
+    def seed_all(self) -> int:
+        """Seed Python, NumPy, and torch (if available) using the global seed.
+
+        Returns the seed used so callers can log it.
+        """
+        s = self.get_seed(42)
+        # Python
+        try:
+            random.seed(s)
+        except Exception:
+            pass
+        # NumPy
+        try:
+            if np is not None:
+                np.random.seed(s)
+        except Exception:
+            pass
+        # Torch (optional)
+        try:
+            import torch
+            torch.manual_seed(s)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(s)
+        except Exception:
+            pass
+        # Make runs a bit more reproducible in some libs
+        try:
+            os.environ.setdefault('PYTHONHASHSEED', str(s))
+        except Exception:
+            pass
+        return s
 
 
 # Global configuration instance - loads from config.yaml automatically

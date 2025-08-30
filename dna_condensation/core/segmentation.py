@@ -598,7 +598,7 @@ def segment_image(image: np.ndarray, channel_index: int, method: str = 'yolo', u
     else:
         raise ValueError(f"Unknown segmentation method: {method}. Choose 'yolo', 'watershed', 'otsu', or 'stardist'")
 
-def filter_labels_by_size(labels: np.ndarray, min_size_percentage: float = 10.0, verbose: bool = False) -> np.ndarray:
+def filter_labels_by_size(labels: np.ndarray, min_size_percentage: float = 10.0, verbose: bool = False, reference_percentile: float = 50.0) -> np.ndarray:
     """
     Filter labeled mask by removing objects smaller than a percentage of the median size.
     
@@ -629,14 +629,20 @@ def filter_labels_by_size(labels: np.ndarray, min_size_percentage: float = 10.0,
         sizes.append(size)
     
     sizes = np.array(sizes)
-    median_size = np.median(sizes)
-    min_size_threshold = median_size * (min_size_percentage / 100.0)
+    # Determine reference size by percentile (default 50th = median)
+    try:
+        p = float(reference_percentile)
+    except Exception:
+        p = 50.0
+    p = min(max(p, 1.0), 99.0)  # clamp to [1,99]
+    ref_size = np.percentile(sizes, p)
+    min_size_threshold = ref_size * (min_size_percentage / 100.0)
     
     if verbose:
         print(f"Size filtering statistics:")
         print(f"  Objects before filtering: {len(sizes)}")
-        print(f"  Median size: {median_size:.1f} pixels")
-        print(f"  Minimum size threshold ({min_size_percentage}%): {min_size_threshold:.1f} pixels")
+        print(f"  Reference size (p{p:.0f}): {ref_size:.1f} pixels")
+        print(f"  Minimum size threshold ({min_size_percentage}% of p{p:.0f}): {min_size_threshold:.1f} pixels")
     
     # Create filtered mask
     filtered_labels = np.zeros_like(labels)
@@ -696,15 +702,18 @@ def bulk_segment_images(images: list, channel_index: int, method: str = 'yolo', 
     # Parse size filtering configuration
     apply_size_filter = False
     min_size_percentage = 10.0
+    reference_percentile = 50.0
     
     if size_filter_config is not None:
         apply_size_filter = size_filter_config.get('enabled', False)
         min_size_percentage = size_filter_config.get('min_size_percentage', 10.0)
+        reference_percentile = size_filter_config.get('reference_percentile', 50.0)
     
     if verbose:
         gpu_status = "GPU" if (use_gpu and HAS_CUPY and method.lower() == 'yolo') else "CPU"
         mask_type = "labeled" if return_labels else "binary"
-        filter_status = f"with {min_size_percentage}% size filter" if apply_size_filter else "no filtering"
+        ref_tag = f"p{int(reference_percentile)}" if apply_size_filter else ""
+        filter_status = f"with {min_size_percentage}% of {ref_tag} size filter" if apply_size_filter else "no filtering"
         print(f"Segmenting {len(images)} images using {method.upper()} on {gpu_status} ({mask_type} masks, channel {channel_index}, {filter_status})")
     
     for i, img in enumerate(images):
@@ -722,7 +731,7 @@ def bulk_segment_images(images: list, channel_index: int, method: str = 'yolo', 
                 # Apply size filtering if enabled
                 if apply_size_filter:
                     original_count = len(np.unique(mask)) - 1
-                    mask = filter_labels_by_size(mask, min_size_percentage=min_size_percentage, verbose=False)
+                    mask = filter_labels_by_size(mask, min_size_percentage=min_size_percentage, verbose=False, reference_percentile=reference_percentile)
                     filtered_count = len(np.unique(mask)) - 1
                     
                     if verbose and i < 3:  # Show filtering stats for first few images
@@ -750,6 +759,6 @@ def bulk_segment_images(images: list, channel_index: int, method: str = 'yolo', 
         print(f"Successfully segmented {successful}/{len(images)} images using {method.upper()}")
         
         if apply_size_filter and successful > 0:
-            print(f"Size filtering applied: minimum {min_size_percentage}% of median object size")
+            print(f"Size filtering applied: minimum {min_size_percentage}% of p{int(reference_percentile)} object size")
     
     return segmented_masks

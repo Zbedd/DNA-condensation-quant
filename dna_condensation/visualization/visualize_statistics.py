@@ -843,7 +843,8 @@ class StatisticalVisualizer:
             pc.set_alpha(0.7)
 
         # Jittered points (per nucleus)
-        rng = np.random.default_rng(42)
+        from dna_condensation.pipeline.config import config
+        rng = np.random.default_rng(config.get_seed(42))
         for i, g in enumerate(groups):
             vals = plot_data[plot_data[group_column] == g][metric].values
             if len(vals) == 0:
@@ -865,6 +866,7 @@ class StatisticalVisualizer:
                         x = rng.normal(i, 0.15, size=len(vals))
                         ax.scatter(x, vals, s=45, alpha=0.9, color='black', edgecolor=colors[i], linewidth=1.5, marker='D')
 
+        # Common axis formatting (run once after plotting all artists)
         ax.set_xticks(range(len(groups)))
         ax.set_xticklabels(groups, rotation=30, ha='right')
         ax.tick_params(axis='x', labelsize=11)
